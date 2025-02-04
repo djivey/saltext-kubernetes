@@ -640,3 +640,249 @@ remove_configmap:
                 namespace="default",
             )
             assert ret.data is None
+
+    def test_replicaset_present_absent(self, salt_call_cli, state_tree, caplog):
+        """Test replicaset present and absent states"""
+        caplog.set_level(logging.INFO)
+        test_rs = "test-replicaset-state"
+
+        # Create replicaset state file
+        state_file = state_tree / "test_replicaset.sls"
+        state_file.write_text(
+            f"""
+    test_replicaset:
+      kubernetes.replicaset_present:
+        - name: {test_rs}
+        - namespace: default
+        - metadata:
+            labels:
+              app: test
+        - spec:
+            replicas: 2
+            selector:
+              matchLabels:
+                app: test
+            template:
+              metadata:
+                labels:
+                  app: test
+              spec:
+                containers:
+                  - name: nginx
+                    image: nginx:latest
+                    ports:
+                      - containerPort: 80
+    """
+        )
+
+        try:
+            # Apply replicaset present state
+            ret = salt_call_cli.run("state.apply", "test_replicaset")
+            assert ret.returncode == 0
+            assert ret.data
+            # Check state result
+            state_ret = ret.data[next(iter(ret.data))]
+            assert state_ret["result"] is True
+            assert state_ret["changes"]
+
+            # Verify replicaset exists in k8s
+            ret = salt_call_cli.run("kubernetes.show_replicaset", name=test_rs, namespace="default")
+            assert ret.returncode == 0
+            assert ret.data["metadata"]["name"] == test_rs
+            assert ret.data["spec"]["replicas"] == 2
+
+            # Test idempotency
+            ret = salt_call_cli.run("state.apply", "test_replicaset")
+            assert ret.returncode == 0
+            assert ret.data
+            state_ret = ret.data[next(iter(ret.data))]
+            assert state_ret["result"] is True
+
+        finally:
+            # Test absent state
+            state_file.write_text(
+                f"""
+    remove_replicaset:
+      kubernetes.replicaset_absent:
+        - name: {test_rs}
+        - namespace: default
+    """
+            )
+
+            ret = salt_call_cli.run("state.apply", "test_replicaset")
+            assert ret.returncode == 0
+            assert ret.data
+            state_ret = ret.data[next(iter(ret.data))]
+            assert state_ret["result"] is True
+            assert state_ret["changes"]
+
+            # Verify replicaset is gone
+            ret = salt_call_cli.run("kubernetes.show_replicaset", name=test_rs, namespace="default")
+            assert ret.returncode == 0
+            assert ret.data is None
+
+    def test_replicaset_present_with_template(self, salt_call_cli, state_tree, caplog):
+        """Test replicaset present state using template"""
+        caplog.set_level(logging.INFO)
+        test_rs = "test-replicaset-template"
+
+        # Create template file
+        template_file = state_tree / "replicaset-template.yaml.jinja"
+        template_file.write_text(
+            """
+    apiVersion: apps/v1
+    kind: ReplicaSet
+    metadata:
+      name: {{ name }}
+      namespace: {{ namespace }}
+      labels:
+        app: {{ app_label }}
+    spec:
+      replicas: {{ replicas }}
+      selector:
+        matchLabels:
+          app: {{ app_label }}
+      template:
+        metadata:
+          labels:
+            app: {{ app_label }}
+        spec:
+          containers:
+          - name: {{ name }}
+            image: {{ image }}
+            ports:
+            - containerPort: 80
+    """
+        )
+
+        # Create state file using template
+        state_file = state_tree / "test_replicaset_template.sls"
+        state_file.write_text(
+            f"""
+    test_replicaset:
+      kubernetes.replicaset_present:
+        - name: {test_rs}
+        - namespace: default
+        - source: salt://replicaset-template.yaml.jinja
+        - template: jinja
+        - context:
+            name: {test_rs}
+            namespace: default
+            app_label: test
+            replicas: 2
+            image: nginx:latest
+    """
+        )
+
+        try:
+            # Apply state
+            ret = salt_call_cli.run("state.apply", "test_replicaset_template")
+            assert ret.returncode == 0
+            assert ret.data
+            state_ret = ret.data[next(iter(ret.data))]
+            assert state_ret["result"] is True
+            assert state_ret["changes"]
+
+            # Verify replicaset was created correctly
+            ret = salt_call_cli.run("kubernetes.show_replicaset", name=test_rs, namespace="default")
+            assert ret.returncode == 0
+            assert ret.data["metadata"]["name"] == test_rs
+            assert ret.data["spec"]["replicas"] == 2
+            assert ret.data["spec"]["template"]["spec"]["containers"][0]["image"] == "nginx:latest"
+
+        finally:
+            # Cleanup
+            salt_call_cli.run(
+                "state.single",
+                "kubernetes.replicaset_absent",
+                name=test_rs,
+                namespace="default",
+            )
+
+    def test_replicaset_present_test_mode(self, salt_call_cli, state_tree, caplog):
+        """Test replicaset present state in test mode"""
+        caplog.set_level(logging.INFO)
+        test_rs = "test-replicaset-testmode"
+
+        # Create state file
+        state_file = state_tree / "test_replicaset.sls"
+        state_file.write_text(
+            f"""
+    test_replicaset:
+      kubernetes.replicaset_present:
+        - name: {test_rs}
+        - namespace: default
+        - metadata:
+            labels:
+              app: test
+        - spec:
+            replicas: 2
+            selector:
+              matchLabels:
+                app: test
+            template:
+              metadata:
+                labels:
+                  app: test
+              spec:
+                containers:
+                  - name: nginx
+                    image: nginx:latest
+    """
+        )
+
+        # Test with test=True
+        ret = salt_call_cli.run("state.apply", "test_replicaset", test=True)
+        assert ret.returncode == 0
+        state_ret = ret.data[next(iter(ret.data))]
+        assert state_ret["result"] is None
+        assert state_ret["comment"] == "The replicaset is going to be created"
+        assert not state_ret["changes"]
+
+        # Create replicaset
+        ret = salt_call_cli.run("state.apply", "test_replicaset")
+        assert ret.returncode == 0
+
+        try:
+            # Update state file with new replicas
+            state_file.write_text(
+                f"""
+    test_replicaset:
+      kubernetes.replicaset_present:
+        - name: {test_rs}
+        - namespace: default
+        - metadata:
+            labels:
+              app: test
+        - spec:
+            replicas: 3
+            selector:
+              matchLabels:
+                app: test
+            template:
+              metadata:
+                labels:
+                  app: test
+              spec:
+                containers:
+                  - name: nginx
+                    image: nginx:latest
+    """
+            )
+
+            # Test update with test=True
+            ret = salt_call_cli.run("state.apply", "test_replicaset", test=True)
+            assert ret.returncode == 0
+            state_ret = ret.data[next(iter(ret.data))]
+            assert state_ret["result"] is None
+            assert "going to be replaced" in state_ret["comment"]
+            assert not state_ret["changes"]
+
+        finally:
+            # Cleanup
+            salt_call_cli.run(
+                "state.single",
+                "kubernetes.replicaset_absent",
+                name=test_rs,
+                namespace="default",
+            )

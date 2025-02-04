@@ -466,6 +466,33 @@ def configmaps(namespace="default", **kwargs):
         _cleanup(**cfg)
 
 
+def replicasets(namespace="default", **kwargs):
+    """
+    Return a list of kubernetes replicasets defined in the namespace
+
+    CLI Example:
+
+    .. code-block:: bash
+
+        salt '*' kubernetes.replicasets
+        salt '*' kubernetes.replicasets namespace=default
+    """
+    cfg = _setup_conn(**kwargs)
+    try:
+        api_instance = kubernetes.client.AppsV1Api()
+        api_response = api_instance.list_namespaced_replica_set(namespace)
+
+        return [rs["metadata"]["name"] for rs in api_response.to_dict().get("items")]
+    except (ApiException, HTTPError) as exc:
+        if isinstance(exc, ApiException) and exc.status == 404:
+            return None
+        else:
+            log.exception("Exception when calling AppsV1Api->list_namespaced_replica_set")
+            raise CommandExecutionError(exc)
+    finally:
+        _cleanup(**cfg)
+
+
 def show_deployment(name, namespace="default", **kwargs):
     """
     Return the kubernetes deployment defined by name and namespace
@@ -641,6 +668,33 @@ def show_configmap(name, namespace="default", **kwargs):
             return None
         else:
             log.exception("Exception when calling CoreV1Api->read_namespaced_config_map")
+            raise CommandExecutionError(exc)
+    finally:
+        _cleanup(**cfg)
+
+
+def show_replicaset(name, namespace="default", **kwargs):
+    """
+    Return the kubernetes replicaset defined by name and namespace
+
+    CLI Example:
+
+    .. code-block:: bash
+
+        salt '*' kubernetes.show_replicaset my-nginx default
+        salt '*' kubernetes.show_replicaset name=my-nginx namespace=default
+    """
+    cfg = _setup_conn(**kwargs)
+    try:
+        api_instance = kubernetes.client.AppsV1Api()
+        api_response = api_instance.read_namespaced_replica_set(name, namespace)
+
+        return api_response.to_dict()
+    except (ApiException, HTTPError) as exc:
+        if isinstance(exc, ApiException) and exc.status == 404:
+            return None
+        else:
+            log.exception("Exception when calling AppsV1Api->read_namespaced_replica_set")
             raise CommandExecutionError(exc)
     finally:
         _cleanup(**cfg)
@@ -849,6 +903,60 @@ def delete_configmap(name, namespace="default", **kwargs):
             return None
         else:
             log.exception("Exception when calling CoreV1Api->delete_namespaced_config_map")
+            raise CommandExecutionError(exc)
+    finally:
+        _cleanup(**cfg)
+
+
+def delete_replicaset(name, namespace="default", **kwargs):
+    """
+    Deletes the kubernetes replicaset defined by name and namespace
+
+    CLI Example:
+
+    .. code-block:: bash
+
+        salt '*' kubernetes.delete_replicaset my-nginx default
+        salt '*' kubernetes.delete_replicaset name=my-nginx namespace=default
+    """
+    cfg = _setup_conn(**kwargs)
+    body = kubernetes.client.V1DeleteOptions(orphan_dependents=True)
+
+    try:
+        api_instance = kubernetes.client.AppsV1Api()
+        api_response = api_instance.delete_namespaced_replica_set(
+            name=name, namespace=namespace, body=body
+        )
+        mutable_api_response = api_response.to_dict()
+        if not salt.utils.platform.is_windows():
+            try:
+                with _time_limit(POLLING_TIME_LIMIT):
+                    while show_replicaset(name, namespace) is not None:
+                        time.sleep(1)
+                    else:  # pylint: disable=useless-else-on-loop
+                        mutable_api_response["code"] = 200
+            except TimeoutError:
+                pass
+        else:
+            # Windows has not signal.alarm implementation, so we are just falling
+            # back to loop-counting.
+            for _ in range(60):
+                if show_replicaset(name, namespace) is None:
+                    mutable_api_response["code"] = 200
+                    break
+                time.sleep(1)
+        if mutable_api_response["code"] != 200:
+            log.warning(
+                "Reached polling time limit. ReplicaSet is not yet "
+                "deleted, but we are backing off. Sorry, but you'll "
+                "have to check manually."
+            )
+        return mutable_api_response
+    except (ApiException, HTTPError) as exc:
+        if isinstance(exc, ApiException) and exc.status == 404:
+            return None
+        else:
+            log.exception("Exception when calling AppsV1Api->delete_namespaced_replica_set")
             raise CommandExecutionError(exc)
     finally:
         _cleanup(**cfg)
@@ -1194,6 +1302,49 @@ def create_namespace(name, **kwargs):
         _cleanup(**cfg)
 
 
+def create_replicaset(
+    name, namespace, metadata, spec, source, template, saltenv, context=None, **kwargs
+):
+    """
+    Creates the kubernetes replicaset as defined by the user.
+
+    CLI Example:
+
+    .. code-block:: bash
+
+        salt '*' kubernetes.create_replicaset *args
+    """
+    body = __create_object_body(
+        kind="ReplicaSet",
+        obj_class=kubernetes.client.V1ReplicaSet,
+        spec_creator=__dict_to_replicaset_spec,
+        name=name,
+        namespace=namespace,
+        metadata=metadata,
+        spec=spec,
+        source=source,
+        template=template,
+        saltenv=saltenv,
+        context=context,
+    )
+
+    cfg = _setup_conn(**kwargs)
+
+    try:
+        api_instance = kubernetes.client.AppsV1Api()
+        api_response = api_instance.create_namespaced_replica_set(namespace, body)
+
+        return api_response.to_dict()
+    except (ApiException, HTTPError) as exc:
+        if isinstance(exc, ApiException) and exc.status == 404:
+            return None
+        else:
+            log.exception("Exception when calling AppsV1Api->create_namespaced_replica_set")
+            raise CommandExecutionError(exc)
+    finally:
+        _cleanup(**cfg)
+
+
 def replace_deployment(
     name, metadata, spec, source, template, saltenv, namespace="default", context=None, **kwargs
 ):
@@ -1427,6 +1578,50 @@ def replace_configmap(
         _cleanup(**cfg)
 
 
+def replace_replicaset(
+    name, metadata, spec, source, template, saltenv, namespace="default", context=None, **kwargs
+):
+    """
+    Replaces an existing replicaset with a new one defined by name and namespace,
+    having the specified metadata and spec.
+
+    CLI Example:
+
+    .. code-block:: bash
+
+        salt '*' kubernetes.replace_replicaset *args
+    """
+    body = __create_object_body(
+        kind="ReplicaSet",
+        obj_class=kubernetes.client.V1ReplicaSet,
+        spec_creator=__dict_to_replicaset_spec,
+        name=name,
+        namespace=namespace,
+        metadata=metadata,
+        spec=spec,
+        source=source,
+        template=template,
+        saltenv=saltenv,
+        context=context,
+    )
+
+    cfg = _setup_conn(**kwargs)
+
+    try:
+        api_instance = kubernetes.client.AppsV1Api()
+        api_response = api_instance.replace_namespaced_replica_set(name, namespace, body)
+
+        return api_response.to_dict()
+    except (ApiException, HTTPError) as exc:
+        if isinstance(exc, ApiException) and exc.status == 404:
+            return None
+        else:
+            log.exception("Exception when calling AppsV1Api->replace_namespaced_replica_set")
+            raise CommandExecutionError(exc)
+    finally:
+        _cleanup(**cfg)
+
+
 def __is_base64(value):
     """
     Check if a string is base64 encoded by attempting to decode it.
@@ -1644,9 +1839,7 @@ def __dict_to_pod_spec(spec):
     if spec is None:
         raise CommandExecutionError("Pod spec cannot be None")
 
-    # Directly return if already a V1PodSpec
-    if isinstance(spec, kubernetes.client.V1PodSpec):
-        return spec
+    # Remove direct V1PodSpec check since it's problematic with mocks
     if not isinstance(spec, dict):
         raise CommandExecutionError(f"Pod spec must be a dictionary, not {type(spec).__name__}")
 
@@ -1847,3 +2040,69 @@ def __enforce_only_strings_dict(dictionary):
         )
 
     return ret
+
+
+def __dict_to_replicaset_spec(spec):
+    """
+    Converts a dictionary into kubernetes V1ReplicaSetSpec instance.
+    """
+    if not isinstance(spec, dict):
+        raise CommandExecutionError(
+            f"ReplicaSet spec must be a dictionary, not {type(spec).__name__}"
+        )
+
+    processed_spec = spec.copy()
+
+    # Validate required template field
+    if "template" not in processed_spec:
+        raise CommandExecutionError("ReplicaSet spec must include template with pod specification")
+
+    template = processed_spec["template"]
+    template_metadata = template.get("metadata", {})
+    template_labels = template_metadata.get("labels", {})
+
+    # Handle selector
+    if "selector" not in processed_spec:
+        if not template_labels:
+            raise CommandExecutionError(
+                "Template must include labels when selector is not specified"
+            )
+        processed_spec["selector"] = {"matchLabels": template_labels}
+    else:
+        selector = processed_spec["selector"]
+        if not selector or not selector.get("matchLabels"):
+            raise CommandExecutionError("ReplicaSet selector must include matchLabels")
+        if not all(template_labels.get(k) == v for k, v in selector["matchLabels"].items()):
+            raise CommandExecutionError("selector.matchLabels must match template metadata.labels")
+
+    # Convert selector format
+    if "matchLabels" in processed_spec["selector"]:
+        processed_spec["selector"] = kubernetes.client.V1LabelSelector(
+            match_labels=processed_spec["selector"]["matchLabels"]
+        )
+
+    # Create pod spec
+    try:
+        pod_spec = __dict_to_pod_spec(template["spec"])
+    except (CommandExecutionError, ValueError) as exc:
+        raise CommandExecutionError(f"Invalid pod spec in replicaset template: {exc}")
+
+    # Create pod template
+    pod_template = kubernetes.client.V1PodTemplateSpec(
+        metadata=kubernetes.client.V1ObjectMeta(**template_metadata), spec=pod_spec
+    )
+
+    processed_spec["template"] = pod_template
+
+    # Handle replicas conversion
+    if "replicas" in processed_spec:
+        try:
+            processed_spec["replicas"] = int(processed_spec["replicas"])
+        except (TypeError, ValueError) as exc:
+            raise CommandExecutionError(f"replicas must be an integer: {exc}")
+
+    # Create final spec
+    try:
+        return kubernetes.client.V1ReplicaSetSpec(**processed_spec)
+    except (TypeError, ValueError) as exc:
+        raise CommandExecutionError(f"Invalid replicaset spec: {exc}")

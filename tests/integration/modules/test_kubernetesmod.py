@@ -421,3 +421,183 @@ class TestKubernetesModule:
             namespace=secret["metadata"]["namespace"],
         )
         assert ret.data is None
+
+    def test_replicasets_lifecycle(self, kubernetes_salt_master, salt_call_cli, caplog):
+        """Test the complete lifecycle of replicasets"""
+        caplog.set_level(logging.INFO)
+        test_rs = "salt-test-rs-lifecycle"
+        namespace = "default"
+
+        # ReplicaSet spec with nginx
+        rs_spec = {
+            "metadata": {"name": test_rs, "namespace": namespace, "labels": {"app": "nginx"}},
+            "spec": {
+                "replicas": 2,
+                "selector": {"matchLabels": {"app": "nginx"}},
+                "template": {
+                    "metadata": {"labels": {"app": "nginx"}},
+                    "spec": {
+                        "containers": [
+                            {
+                                "name": "nginx",
+                                "image": "nginx:latest",
+                                "ports": [{"containerPort": 80}],
+                            }
+                        ]
+                    },
+                },
+            },
+        }
+
+        try:
+            # Create replicaset
+            result = salt_call_cli.run(
+                "kubernetes.create_replicaset",
+                name=test_rs,
+                namespace=namespace,
+                metadata=rs_spec["metadata"],
+                spec=rs_spec["spec"],
+                source=None,
+                template=None,
+                saltenv="base",
+            )
+            assert result.returncode == 0
+            assert isinstance(result.data, dict)
+            assert result.data["metadata"]["name"] == test_rs
+
+            # Wait for replicaset to be accessible
+            for _ in range(5):
+                if salt_call_cli.run(
+                    "kubernetes.show_replicaset",
+                    name=test_rs,
+                    namespace=namespace,
+                ).data:
+                    break
+                time.sleep(2)
+            else:
+                pytest.fail("ReplicaSet was not created")
+
+            # Show replicaset details
+            result = salt_call_cli.run(
+                "kubernetes.show_replicaset",
+                name=test_rs,
+                namespace=namespace,
+            )
+            assert result.returncode == 0
+            assert result.data["metadata"]["name"] == test_rs
+            assert result.data["spec"]["replicas"] == 2
+            assert result.data["spec"]["template"]["spec"]["containers"][0]["name"] == "nginx"
+
+            # List replicasets and verify ours exists
+            result = salt_call_cli.run(
+                "kubernetes.replicasets",
+                namespace=namespace,
+            )
+            assert result.returncode == 0
+            assert isinstance(result.data, list)
+            assert test_rs in result.data
+
+            # Update replicaset
+            rs_spec["spec"]["replicas"] = 3
+            result = salt_call_cli.run(
+                "kubernetes.replace_replicaset",
+                name=test_rs,
+                namespace=namespace,
+                metadata=rs_spec["metadata"],
+                spec=rs_spec["spec"],
+                source=None,
+                template=None,
+                saltenv="base",
+            )
+            assert result.returncode == 0
+            assert result.data["spec"]["replicas"] == 3
+
+        finally:
+            # Delete replicaset
+            result = salt_call_cli.run(
+                "kubernetes.delete_replicaset",
+                name=test_rs,
+                namespace=namespace,
+            )
+            assert result.returncode == 0
+
+            # Verify replicaset is gone with retry
+            for _ in range(5):
+                if not salt_call_cli.run(
+                    "kubernetes.show_replicaset",
+                    name=test_rs,
+                    namespace=namespace,
+                ).data:
+                    break
+                time.sleep(2)
+            else:
+                pytest.fail("ReplicaSet still exists after deletion")
+
+    def test_replicaset_validation(self, salt_call_cli, caplog):
+        """Test replicaset validation"""
+        caplog.set_level(logging.INFO)
+        test_rs = "salt-test-rs-validation"
+        namespace = "default"
+
+        # Invalid specs to test validation
+        invalid_specs = [
+            # Missing template
+            {
+                "selector": {"matchLabels": {"app": "nginx"}},
+            },
+            # Invalid replicas type
+            {
+                "replicas": "invalid",
+                "selector": {"matchLabels": {"app": "nginx"}},
+                "template": {
+                    "metadata": {"labels": {"app": "nginx"}},
+                    "spec": {"containers": [{"name": "nginx", "image": "nginx:latest"}]},
+                },
+            },
+            # Mismatched selector/template labels
+            {
+                "selector": {"matchLabels": {"app": "nginx"}},
+                "template": {
+                    "metadata": {"labels": {"app": "different"}},
+                    "spec": {"containers": [{"name": "nginx", "image": "nginx:latest"}]},
+                },
+            },
+        ]
+
+        for spec in invalid_specs:
+            result = salt_call_cli.run(
+                "kubernetes.create_replicaset",
+                name=test_rs,
+                namespace=namespace,
+                metadata={},
+                spec=spec,
+                source=None,
+                template=None,
+                saltenv="base",
+            )
+            # Should fail with error
+            assert result.returncode != 0
+            assert result.stderr != ""  # Verify there is an error message
+            assert any(x in result.stderr.lower() for x in ["invalid", "error", "must"])
+
+    def test_show_nonexistent_replicaset(self, kubernetes_salt_master, salt_call_cli, caplog):
+        """Test showing a nonexistent replicaset returns None"""
+        caplog.set_level(logging.INFO)
+        result = salt_call_cli.run(
+            "kubernetes.show_replicaset",
+            name="nonexistent-rs",
+            namespace="default",
+        )
+        assert result.returncode == 0
+        assert result.data is None
+
+    def test_delete_nonexistent_replicaset(self, kubernetes_salt_master, salt_call_cli, caplog):
+        """Test deleting a nonexistent replicaset returns None"""
+        caplog.set_level(logging.INFO)
+        result = salt_call_cli.run(
+            "kubernetes.delete_replicaset",
+            name="nonexistent-rs",
+            namespace="default",
+        )
+        assert result.returncode == 0
+        assert result.data is None

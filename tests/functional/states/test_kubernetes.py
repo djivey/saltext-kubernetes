@@ -205,6 +205,43 @@ def configmap_template(state_tree):
         yield f"salt://{sls}.yml.jinja"
 
 
+@pytest.fixture
+def replicaset_template(state_tree):
+    """Fixture for replicaset template file"""
+    sls = "k8s/replicaset-template"
+    contents = dedent(
+        """
+        apiVersion: apps/v1
+        kind: ReplicaSet
+        metadata:
+          name: {{ name }}
+          namespace: {{ namespace }}
+          labels:
+            {% for key, value in labels.items() %}
+            {{ key }}: {{ value }}
+            {% endfor %}
+        spec:
+          replicas: {{ replicas }}
+          selector:
+            matchLabels:
+              app: {{ app_label }}
+          template:
+            metadata:
+              labels:
+                app: {{ app_label }}
+            spec:
+              containers:
+              - name: {{ name }}
+                image: {{ image }}
+                ports:
+                - containerPort: 80
+        """
+    ).strip()
+
+    with pytest.helpers.temp_file(f"{sls}.yml.jinja", contents, state_tree):
+        yield f"salt://{sls}.yml.jinja"
+
+
 def test_namespace_present(kubernetes, caplog):
     """
     Test kubernetes.namespace_present ensures namespace is created
@@ -1046,3 +1083,182 @@ def test_service_account_token_secret_present(kubernetes):
     # We don't test second run since token will always be different
     # Just clean up
     kubernetes.secret_absent(name=secret_name, namespace=namespace)
+
+
+def test_replicaset_lifecycle(kubernetes, caplog):
+    """
+    Test kubernetes.replicaset_present/.absent states for full lifecycle management
+    """
+    caplog.set_level(logging.INFO)
+    test_rs = "salt-test-replicaset"
+    namespace = "default"
+    metadata = {"labels": {"app": "test"}}
+    spec = {
+        "replicas": 2,
+        "selector": {"matchLabels": {"app": "test"}},
+        "template": {
+            "metadata": {"labels": {"app": "test"}},
+            "spec": {
+                "containers": [
+                    {
+                        "name": "nginx",
+                        "image": "nginx:latest",
+                        "ports": [{"containerPort": 80}],
+                    }
+                ]
+            },
+        },
+    }
+
+    try:
+        # Create replicaset
+        result = kubernetes.replicaset_present(
+            name=test_rs,
+            namespace=namespace,
+            metadata=metadata,
+            spec=spec,
+        )
+        assert result["result"] is True
+        assert result["changes"]
+
+        # Run replicaset_present again to verify idempotency
+        result = kubernetes.replicaset_present(
+            name=test_rs,
+            namespace=namespace,
+            metadata=metadata,
+            spec=spec,
+        )
+        assert result["result"] is True
+
+        # Delete replicaset
+        result = kubernetes.replicaset_absent(name=test_rs, namespace=namespace)
+        assert result["result"] is True
+        assert result["changes"]["kubernetes.replicaset"]["new"] == "absent"
+
+        # Run replicaset_absent again to verify idempotency
+        result = kubernetes.replicaset_absent(name=test_rs, namespace=namespace)
+        assert result["result"] is True
+        assert result["comment"] == "The replicaset does not exist"
+
+    finally:
+        # Cleanup
+        kubernetes.replicaset_absent(name=test_rs, namespace=namespace)
+
+
+def test_replicaset_present_with_template(kubernetes, caplog, replicaset_template):
+    """Test replicaset_present with template and context"""
+    caplog.set_level(logging.INFO)
+    test_rs = "salt-test-replicaset-template"
+    namespace = "default"
+    context = {
+        "name": test_rs,
+        "namespace": namespace,
+        "labels": {"app": "test"},
+        "replicas": 2,
+        "app_label": "test",
+        "image": "nginx:latest",
+    }
+
+    try:
+        # Create replicaset using template
+        result = kubernetes.replicaset_present(
+            name=test_rs,
+            namespace=namespace,
+            source=replicaset_template,
+            template="jinja",
+            context=context,
+        )
+        assert result["result"] is True
+        assert result["changes"]
+
+        # Update replicaset with new context
+        new_context = dict(context, replicas=3)
+        result = kubernetes.replicaset_present(
+            name=test_rs,
+            namespace=namespace,
+            source=replicaset_template,
+            template="jinja",
+            context=new_context,
+        )
+        assert result["result"] is True
+
+    finally:
+        # Cleanup
+        kubernetes.replicaset_absent(name=test_rs, namespace=namespace)
+
+
+def test_replicaset_present_with_test_true(kubernetes, caplog):
+    """Test replicaset_present with test flag true and false"""
+    caplog.set_level(logging.INFO)
+    test_rs = "salt-test-replicaset-test"
+    namespace = "default"
+    metadata = {"labels": {"app": "test"}}
+    spec = {
+        "replicas": 2,
+        "selector": {"matchLabels": {"app": "test"}},
+        "template": {
+            "metadata": {"labels": {"app": "test"}},
+            "spec": {
+                "containers": [
+                    {
+                        "name": "nginx",
+                        "image": "nginx:latest",
+                        "ports": [{"containerPort": 80}],
+                    }
+                ]
+            },
+        },
+    }
+
+    try:
+        # Verify replicaset doesn't exist
+        result = kubernetes.replicaset_absent(name=test_rs, namespace=namespace)
+        assert result["result"] is True
+
+        # Test creation with test=True
+        result = kubernetes.replicaset_present(
+            name=test_rs,
+            namespace=namespace,
+            metadata=metadata,
+            spec=spec,
+            test=True,
+            source="",
+            template="",
+            saltenv="base",
+        )
+        assert result["result"] is None  # None indicates test mode
+        assert "going to be created" in result["comment"]
+
+        # Create replicaset
+        result = kubernetes.replicaset_present(
+            name=test_rs,
+            namespace=namespace,
+            metadata=metadata,
+            spec=spec,
+            source="",
+            template="",
+            saltenv="base",
+        )
+        assert result["result"] is True
+        assert result["changes"]
+
+        # Prepare changed spec for update test
+        new_spec = dict(spec, replicas=3)
+
+        # Test modification with test=True
+        result = kubernetes.replicaset_present(
+            name=test_rs,
+            namespace=namespace,
+            metadata=metadata,
+            spec=new_spec,
+            test=True,
+            source="",
+            template="",
+            saltenv="base",
+        )
+        assert result["result"] is None
+        assert "going to be replaced" in result["comment"]
+
+    finally:
+        # Cleanup
+        kubernetes.replicaset_absent(name=test_rs, namespace=namespace)

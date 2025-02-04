@@ -964,3 +964,116 @@ def test_secret_present_with_context():
                 type=None,
                 metadata={},
             )
+
+
+def test_replicaset_absent__noop_test_true():
+    """Test replicaset_absent with test=True and replicaset does not exist"""
+    with mock_func("show_replicaset", return_value=None, test=True):
+        actual = kubernetes.replicaset_absent(name="test-rs")
+        assert actual == {
+            "comment": "The replicaset does not exist",
+            "changes": {},
+            "name": "test-rs",
+            "result": None,
+        }
+
+
+def test_replicaset_absent__noop():
+    """Test replicaset_absent when replicaset does not exist"""
+    with mock_func("show_replicaset", return_value=None):
+        actual = kubernetes.replicaset_absent(name="test-rs")
+        assert actual == {
+            "comment": "The replicaset does not exist",
+            "changes": {},
+            "name": "test-rs",
+            "result": True,
+        }
+
+
+def test_replicaset_absent__delete_test_true():
+    """Test replicaset_absent with test=True and replicaset exists"""
+    with mock_func("show_replicaset", return_value={"metadata": {"name": "test-rs"}}, test=True):
+        actual = kubernetes.replicaset_absent(name="test-rs")
+        assert actual == {
+            "comment": "The replicaset is going to be deleted",
+            "changes": {},
+            "name": "test-rs",
+            "result": None,
+        }
+
+
+def test_replicaset_absent__delete():
+    """Test successful replicaset deletion"""
+    with mock_func("show_replicaset", return_value={"metadata": {"name": "test-rs"}}):
+        with mock_func("delete_replicaset", return_value={"code": 200, "message": "Deleted"}):
+            actual = kubernetes.replicaset_absent(name="test-rs")
+            assert actual == {
+                "comment": "Deleted",
+                "changes": {"kubernetes.replicaset": {"new": "absent", "old": "present"}},
+                "name": "test-rs",
+                "result": True,
+            }
+
+
+def test_replicaset_present__create_test_true():
+    """Test replicaset_present with test=True for creation"""
+    with mock_func("show_replicaset", return_value=None, test=True):
+        actual = kubernetes.replicaset_present(
+            name="test-rs",
+            metadata={"labels": {"app": "nginx"}},
+            spec={"replicas": 3},
+        )
+        assert actual == {
+            "comment": "The replicaset is going to be created",
+            "changes": {},
+            "name": "test-rs",
+            "result": None,
+        }
+
+
+def test_replicaset_present__create():
+    """Test successful replicaset creation"""
+    with mock_func("show_replicaset", return_value=None):
+        with mock_func(
+            "create_replicaset",
+            return_value={"metadata": {"name": "test-rs"}, "spec": {"replicas": 3}},
+        ):
+            actual = kubernetes.replicaset_present(
+                name="test-rs",
+                metadata={"labels": {"app": "nginx"}},
+                spec={"replicas": 3},
+            )
+            assert actual == {
+                "comment": "",
+                "changes": {
+                    "metadata": {"labels": {"app": "nginx"}},
+                    "spec": {"replicas": 3},
+                },
+                "name": "test-rs",
+                "result": True,
+            }
+
+
+def test_replicaset_present__create_with_template():
+    """Test replicaset creation using template with context"""
+    context = {"name": "test-rs", "replicas": 3, "image": "nginx:latest"}
+
+    with mock_func("show_replicaset", return_value=None):
+        with mock_func("create_replicaset", return_value={}):
+            ret = kubernetes.replicaset_present(
+                name="test-rs",
+                source="salt://k8s/replicaset.yaml",
+                template="jinja",
+                context=context,
+            )
+            assert ret["result"] is True
+            kubernetes.__salt__["kubernetes.create_replicaset"].assert_called_with(
+                name="test-rs",
+                namespace="default",
+                metadata={},
+                spec={},
+                source="salt://k8s/replicaset.yaml",
+                template="jinja",
+                saltenv="base",
+                context=context,
+            )

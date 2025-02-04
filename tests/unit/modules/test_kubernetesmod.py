@@ -404,3 +404,135 @@ spec:
             assert "port: 80" in rendered_content
             assert "targetPort: 8080" in rendered_content
             assert "type: LoadBalancer" in rendered_content
+
+
+def test_replicasets():
+    """
+    Tests replicaset listing.
+    """
+    with mock_kubernetes_library() as mock_kubernetes_lib:
+        mock_kubernetes_lib.client.AppsV1Api.return_value = Mock(
+            **{
+                "list_namespaced_replica_set.return_value.to_dict.return_value": {
+                    "items": [{"metadata": {"name": "mock_replicaset_name"}}]
+                }
+            }
+        )
+        assert kubernetes.replicasets() == ["mock_replicaset_name"]
+        assert kubernetes.kubernetes.client.AppsV1Api().list_namespaced_replica_set().to_dict.called
+
+
+def test_delete_replicaset():
+    """
+    Tests replicaset deletion
+    """
+    with mock_kubernetes_library() as mock_kubernetes_lib:
+        with patch(
+            "saltext.kubernetes.modules.kubernetesmod.show_replicaset", Mock(return_value=None)
+        ):
+            mock_kubernetes_lib.client.V1DeleteOptions = Mock(return_value="")
+            mock_kubernetes_lib.client.AppsV1Api.return_value = Mock(
+                **{"delete_namespaced_replica_set.return_value.to_dict.return_value": {"code": ""}}
+            )
+            assert kubernetes.delete_replicaset("test") == {"code": 200}
+            assert (
+                kubernetes.kubernetes.client.AppsV1Api()
+                .delete_namespaced_replica_set()
+                .to_dict.called
+            )
+
+
+def test_create_replicaset_with_template():
+    """
+    Test replicaset creation with template and context
+    """
+    template_data = """apiVersion: apps/v1
+kind: ReplicaSet
+metadata:
+  name: test-rs
+spec:
+  replicas: {{ context.replicas }}
+  selector:
+    matchLabels:
+      app: test-rs
+  template:
+    metadata:
+      labels:
+        app: test-rs
+    spec:
+      containers:
+      - name: test-rs
+        image: {{ context.image }}"""
+
+    rendered_data = """apiVersion: apps/v1
+kind: ReplicaSet
+metadata:
+  name: test-rs
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: test-rs
+  template:
+    metadata:
+      labels:
+        app: test-rs
+    spec:
+      containers:
+      - name: test-rs
+        image: nginx:latest"""
+
+    mock_template_data = {"result": True, "data": rendered_data}
+
+    context = {"replicas": 3, "image": "nginx:latest"}
+
+    with mock_kubernetes_library() as mock_kubernetes_lib:
+        with (
+            patch("salt.utils.files.fopen", mock_open(read_data=template_data)),
+            patch(
+                "salt.utils.templates.TEMPLATE_REGISTRY",
+                {"jinja": MagicMock(return_value=mock_template_data)},
+            ),
+            patch(
+                "salt.utils.yaml.safe_load",
+                return_value={
+                    "apiVersion": "apps/v1",
+                    "kind": "ReplicaSet",
+                    "metadata": {"name": "test-rs"},
+                    "spec": {
+                        "replicas": 3,
+                        "selector": {"matchLabels": {"app": "test-rs"}},
+                        "template": {
+                            "metadata": {"labels": {"app": "test-rs"}},
+                            "spec": {"containers": [{"name": "test-rs", "image": "nginx:latest"}]},
+                        },
+                    },
+                },
+            ),
+        ):
+            # Set up proper mocks for kubernetes client classes
+            mock_kubernetes_lib.client.V1ObjectMeta = MagicMock()
+            mock_kubernetes_lib.client.V1Container = MagicMock()
+            mock_kubernetes_lib.client.V1PodSpec = MagicMock()
+            mock_kubernetes_lib.client.V1PodTemplateSpec = MagicMock()
+            mock_kubernetes_lib.client.V1LabelSelector = MagicMock()
+            mock_kubernetes_lib.client.V1ReplicaSetSpec = MagicMock()
+            mock_kubernetes_lib.client.AppsV1Api.return_value = Mock(
+                **{"create_namespaced_replica_set.return_value.to_dict.return_value": {}}
+            )
+
+            ret = kubernetes.create_replicaset(
+                "test-rs",
+                "default",
+                {},
+                {},
+                "/mock/replicaset.yaml",
+                "jinja",
+                "base",
+                context=context,
+            )
+            assert ret == {}
+
+            # Verify template rendering was called with correct context
+            template_mock = list(kubernetes.__salt__["cp.cache_file"].mock_calls)[0]
+            assert template_mock.args[0] == "/mock/replicaset.yaml"

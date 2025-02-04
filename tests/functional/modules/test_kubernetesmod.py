@@ -1407,3 +1407,181 @@ def test_configmap_with_special_characters(kubernetes, caplog):
 
     # Cleanup
     kubernetes.delete_configmap(test_configmap, namespace)
+
+
+def test_replicaset_lifecycle(kubernetes, caplog):
+    """Test the complete lifecycle of a replicaset"""
+    caplog.set_level(logging.INFO)
+    test_rs = "salt-test-replicaset-lifecycle"
+    namespace = "default"
+
+    # ReplicaSet spec for nginx
+    rs_spec = {
+        "replicas": 2,
+        "selector": {"matchLabels": {"app": "nginx"}},
+        "template": {
+            "metadata": {"labels": {"app": "nginx"}},
+            "spec": {
+                "containers": [
+                    {
+                        "name": "nginx",
+                        "image": "nginx:latest",
+                        "ports": [{"containerPort": 80}],
+                    }
+                ]
+            },
+        },
+    }
+
+    try:
+        # Create replicaset
+        result = kubernetes.create_replicaset(
+            name=test_rs,
+            namespace=namespace,
+            metadata={},
+            spec=rs_spec,
+            source=None,
+            template=None,
+            saltenv="base",
+        )
+        assert isinstance(result, dict)
+        assert result["metadata"]["name"] == test_rs
+
+        # Wait for replicaset to be accessible
+        for _ in range(5):
+            if kubernetes.show_replicaset(test_rs, namespace):
+                break
+            time.sleep(2)
+        else:
+            pytest.fail("ReplicaSet was not created")
+
+        # Show replicaset details
+        result = kubernetes.show_replicaset(test_rs, namespace)
+        assert isinstance(result, dict)
+        assert result["metadata"]["name"] == test_rs
+        assert result["spec"]["replicas"] == 2
+        assert result["spec"]["template"]["spec"]["containers"][0]["name"] == "nginx"
+
+        # List replicasets and verify ours exists
+        result = kubernetes.replicasets(namespace=namespace)
+        assert isinstance(result, list)
+        assert test_rs in result
+
+        # Update replicaset
+        rs_spec["replicas"] = 3
+        result = kubernetes.replace_replicaset(
+            name=test_rs,
+            namespace=namespace,
+            metadata={},
+            spec=rs_spec,
+            source=None,
+            template=None,
+            saltenv="base",
+        )
+        assert isinstance(result, dict)
+        assert result["spec"]["replicas"] == 3
+
+    finally:
+        # Delete replicaset
+        result = kubernetes.delete_replicaset(test_rs, namespace)
+        assert isinstance(result, dict)
+
+        # Verify replicaset is gone with retry
+        for _ in range(5):
+            if not kubernetes.show_replicaset(test_rs, namespace):
+                break
+            time.sleep(2)
+        else:
+            pytest.fail("ReplicaSet still exists after deletion")
+
+
+def test_show_nonexistent_replicaset(kubernetes, caplog):
+    """Test showing a replicaset that doesn't exist returns None"""
+    caplog.set_level(logging.INFO)
+    test_rs = "salt-test-nonexistent-replicaset"
+    result = kubernetes.show_replicaset(test_rs)
+    assert result is None
+
+
+def test_delete_nonexistent_replicaset(kubernetes, caplog):
+    """Test deleting a replicaset that doesn't exist returns None"""
+    caplog.set_level(logging.INFO)
+    test_rs = "salt-test-nonexistent-replicaset"
+    result = kubernetes.delete_replicaset(test_rs)
+    assert result is None
+
+
+def test_replicaset_validation(kubernetes, caplog):
+    """Test replicaset validation for different configurations"""
+    caplog.set_level(logging.INFO)
+    test_rs = "salt-test-validation-rs"
+    namespace = "default"
+
+    # Valid spec for comparison
+    valid_spec = {
+        "selector": {"matchLabels": {"app": "nginx"}},
+        "template": {
+            "metadata": {"labels": {"app": "nginx"}},
+            "spec": {"containers": [{"name": "nginx", "image": "nginx:latest"}]},
+        },
+        "replicas": 2,
+    }
+
+    invalid_specs = [
+        # Missing template
+        {"selector": {"matchLabels": {"app": "nginx"}}},
+        # Invalid replicas type
+        {
+            "replicas": "invalid",
+            "selector": {"matchLabels": {"app": "nginx"}},
+            "template": {
+                "metadata": {"labels": {"app": "nginx"}},
+                "spec": {"containers": [{"name": "nginx", "image": "nginx:latest"}]},
+            },
+        },
+        # Mismatched labels between selector and template
+        {
+            "selector": {"matchLabels": {"app": "nginx"}},
+            "template": {
+                "metadata": {"labels": {"app": "different"}},
+                "spec": {"containers": [{"name": "nginx", "image": "nginx:latest"}]},
+            },
+        },
+        # Missing container name
+        {
+            "selector": {"matchLabels": {"app": "nginx"}},
+            "template": {
+                "metadata": {"labels": {"app": "nginx"}},
+                "spec": {"containers": [{"image": "nginx:latest"}]},
+            },
+        },
+    ]
+
+    # First verify valid spec works
+
+    result = kubernetes.create_replicaset(
+        name=test_rs,
+        namespace=namespace,
+        metadata={},
+        spec=valid_spec,
+        source=None,
+        template=None,
+        saltenv="base",
+    )
+    assert isinstance(result, dict)
+    kubernetes.delete_replicaset(test_rs, namespace)
+
+    # Then test invalid specs
+    for spec in invalid_specs:
+        with pytest.raises((CommandExecutionError, ValueError)) as exc:
+            kubernetes.create_replicaset(
+                name=test_rs,
+                namespace=namespace,
+                metadata={},
+                spec=spec,
+                source=None,
+                template=None,
+                saltenv="base",
+            )
+        # Error message should mention validation error
+        assert any(x in str(exc.value).lower() for x in ["invalid", "required", "must"])
