@@ -422,7 +422,7 @@ class TestKubernetesModule:
         )
         assert ret.data is None
 
-    def test_replicasets_lifecycle(self, kubernetes_salt_master, salt_call_cli, caplog):
+    def test_replicasets_lifecycle(self, salt_call_cli, caplog):
         """Test the complete lifecycle of replicasets"""
         caplog.set_level(logging.INFO)
         test_rs = "salt-test-rs-lifecycle"
@@ -580,7 +580,7 @@ class TestKubernetesModule:
             assert result.stderr != ""  # Verify there is an error message
             assert any(x in result.stderr.lower() for x in ["invalid", "error", "must"])
 
-    def test_show_nonexistent_replicaset(self, kubernetes_salt_master, salt_call_cli, caplog):
+    def test_show_nonexistent_replicaset(self, salt_call_cli, caplog):
         """Test showing a nonexistent replicaset returns None"""
         caplog.set_level(logging.INFO)
         result = salt_call_cli.run(
@@ -591,7 +591,7 @@ class TestKubernetesModule:
         assert result.returncode == 0
         assert result.data is None
 
-    def test_delete_nonexistent_replicaset(self, kubernetes_salt_master, salt_call_cli, caplog):
+    def test_delete_nonexistent_replicaset(self, salt_call_cli, caplog):
         """Test deleting a nonexistent replicaset returns None"""
         caplog.set_level(logging.INFO)
         result = salt_call_cli.run(
