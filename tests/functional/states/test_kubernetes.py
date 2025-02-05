@@ -277,6 +277,41 @@ def persistent_volume_template(state_tree):
         yield f"salt://{sls}.yml.jinja"
 
 
+@pytest.fixture
+def pvc_template(state_tree):
+    """Fixture for PVC template file"""
+    sls = "k8s/pvc-template"
+    contents = dedent(
+        """
+        apiVersion: v1
+        kind: PersistentVolumeClaim
+        metadata:
+          name: {{ name }}
+          namespace: {{ namespace }}
+          {% if labels %}
+          labels:
+            {% for key, value in labels.items() %}
+            {{ key }}: {{ value }}
+            {% endfor %}
+          {% endif %}
+        spec:
+          access_modes:
+            {% for mode in access_modes %}
+            - {{ mode }}
+            {% endfor %}
+          resources:
+            requests:
+              storage: {{ storage }}
+          {% if storage_class %}
+          storage_class_name: {{ storage_class }}
+          {% endif %}
+        """
+    ).strip()
+
+    with pytest.helpers.temp_file(f"{sls}.yml.jinja", contents, state_tree):
+        yield f"salt://{sls}.yml.jinja"
+
+
 def test_namespace_present(kubernetes, caplog):
     """
     Test kubernetes.namespace_present ensures namespace is created
@@ -1383,3 +1418,133 @@ def test_persistent_volume_absent(kubernetes, caplog):
     assert result["result"] is True
     assert result["comment"] == "The persistent volume does not exist"
     assert not result["changes"], "Expected no changes on second run"
+
+
+def test_persistent_volume_claim_present(kubernetes, caplog):
+    """Test kubernetes.persistent_volume_claim_present state"""
+    caplog.set_level(logging.INFO)
+    test_pvc = "salt-test-pvc-present"
+    namespace = "default"
+    spec = {
+        "access_modes": ["ReadWriteOnce"],
+        "resources": {"requests": {"storage": "1Gi"}},
+        "storage_class_name": "standard",
+    }
+
+    # Create PVC
+    result = kubernetes.persistent_volume_claim_present(
+        name=test_pvc, namespace=namespace, spec=spec
+    )
+    assert result["result"] is True
+
+    # Note: PVC specs are largely immutable after creation. Only the following can be modified:
+    # resources.requests.storage (can only be increased)
+    # volumeAttributesClassName (for bound claims)
+    # So we'll skip the replacement test
+
+    # Cleanup
+    kubernetes.persistent_volume_claim_absent(name=test_pvc, namespace=namespace)
+
+
+def test_persistent_volume_claim_present_with_template(kubernetes, caplog, pvc_template):
+    """Test kubernetes.persistent_volume_claim_present state using template"""
+    caplog.set_level(logging.INFO)
+    test_pvc = "salt-test-pvc-template"
+    namespace = "default"
+    context = {
+        "name": test_pvc,
+        "namespace": namespace,
+        "labels": {"app": "test"},
+        "access_modes": ["ReadWriteOnce"],
+        "storage": "1Gi",
+        "storage_class": "standard",
+    }
+
+    # Create PVC using template
+    result = kubernetes.persistent_volume_claim_present(
+        name=test_pvc, namespace=namespace, source=pvc_template, template="jinja", context=context
+    )
+    assert result["result"] is True
+
+    # Note: PVC specs are largely immutable after creation. Only the following can be modified:
+    # resources.requests.storage (can only be increased)
+    # volumeAttributesClassName (for bound claims)
+    # So we'll skip the replacement test
+
+    kubernetes.persistent_volume_claim_absent(name=test_pvc, namespace=namespace)
+
+
+def test_persistent_volume_claim_immutability(kubernetes, caplog):
+    """Test that attempting to modify immutable PVC fields fails appropriately"""
+    caplog.set_level(logging.INFO)
+    test_pvc = "salt-test-pvc-immutable"
+    namespace = "default"
+
+    original_spec = {
+        "access_modes": ["ReadWriteOnce"],
+        "resources": {"requests": {"storage": "1Gi"}},
+        "storage_class_name": "standard",
+    }
+
+    try:
+        # Create initial PVC
+        result = kubernetes.persistent_volume_claim_present(
+            name=test_pvc, namespace=namespace, spec=original_spec
+        )
+        assert result["result"] is True
+
+        # Attempt to modify immutable fields
+        modified_spec = dict(original_spec)
+        modified_spec["access_modes"] = ["ReadWriteMany"]  # This should fail
+
+        result = kubernetes.persistent_volume_claim_present(
+            name=test_pvc, namespace=namespace, spec=modified_spec
+        )
+
+        # Should fail since we're trying to modify immutable fields
+        assert not result["result"]
+        assert "forbidden: spec is immutable" in result["comment"].lower()
+        assert not result["changes"]
+
+    finally:
+        kubernetes.persistent_volume_claim_absent(name=test_pvc, namespace=namespace)
+
+
+def test_persistent_volume_claim_present_with_test_true(kubernetes, caplog):
+    """Test kubernetes.persistent_volume_claim_present state with test=True"""
+    caplog.set_level(logging.INFO)
+    test_pvc = "salt-test-pvc-test"
+    namespace = "default"
+    spec = {
+        "access_modes": ["ReadWriteOnce"],
+        "resources": {"requests": {"storage": "1Gi"}},
+        "storage_class_name": "standard",
+    }
+
+    try:
+        # Test PVC creation with test=True
+        result = kubernetes.persistent_volume_claim_present(
+            name=test_pvc, namespace=namespace, spec=spec, test=True
+        )
+        assert result["result"] is None  # None indicates test mode
+        assert "going to be created" in result["comment"].lower()
+        assert not result["changes"]
+
+        # Create actual PVC
+        result = kubernetes.persistent_volume_claim_present(
+            name=test_pvc, namespace=namespace, spec=spec
+        )
+        assert result["result"] is True
+
+        # Test attempting to modify immutable field with test=True
+        new_spec = dict(spec)
+        new_spec["access_modes"] = ["ReadWriteMany"]  # This should be caught as immutable
+        result = kubernetes.persistent_volume_claim_present(
+            name=test_pvc, namespace=namespace, spec=new_spec, test=True
+        )
+        assert result["result"] is None
+        assert "going to be replaced" in result["comment"].lower()
+        assert not result["changes"]
+
+    finally:
+        kubernetes.persistent_volume_claim_absent(name=test_pvc, namespace=namespace)

@@ -519,6 +519,35 @@ def persistent_volumes(**kwargs):
         _cleanup(**cfg)
 
 
+def persistent_volume_claims(namespace="default", **kwargs):
+    """
+    Return a list of kubernetes persistent volume claims defined in the namespace
+
+    CLI Example:
+
+    .. code-block:: bash
+
+        salt '*' kubernetes.persistent_volume_claims
+        salt '*' kubernetes.persistent_volume_claims namespace=default
+    """
+    cfg = _setup_conn(**kwargs)
+    try:
+        api_instance = kubernetes.client.CoreV1Api()
+        api_response = api_instance.list_namespaced_persistent_volume_claim(namespace)
+
+        return [pvc["metadata"]["name"] for pvc in api_response.to_dict().get("items")]
+    except (ApiException, HTTPError) as exc:
+        if isinstance(exc, ApiException) and exc.status == 404:
+            return None
+        else:
+            log.exception(
+                "Exception when calling CoreV1Api->list_namespaced_persistent_volume_claim"
+            )
+            raise CommandExecutionError(exc)
+    finally:
+        _cleanup(**cfg)
+
+
 def show_deployment(name, namespace="default", **kwargs):
     """
     Return the kubernetes deployment defined by name and namespace
@@ -747,6 +776,34 @@ def show_persistent_volume(name, **kwargs):
             return None
         else:
             log.exception("Exception when calling CoreV1Api->read_persistent_volume")
+            raise CommandExecutionError(exc)
+    finally:
+        _cleanup(**cfg)
+
+
+def show_persistent_volume_claim(name, namespace="default", **kwargs):
+    """
+    Return the kubernetes persistent volume claim defined by name and namespace
+
+    CLI Example:
+
+    .. code-block:: bash
+
+        salt '*' kubernetes.show_persistent_volume_claim name=pvc-name namespace=default
+    """
+    cfg = _setup_conn(**kwargs)
+    try:
+        api_instance = kubernetes.client.CoreV1Api()
+        api_response = api_instance.read_namespaced_persistent_volume_claim(name, namespace)
+
+        return api_response.to_dict()
+    except (ApiException, HTTPError) as exc:
+        if isinstance(exc, ApiException) and exc.status == 404:
+            return None
+        else:
+            log.exception(
+                "Exception when calling CoreV1Api->read_namespaced_persistent_volume_claim"
+            )
             raise CommandExecutionError(exc)
     finally:
         _cleanup(**cfg)
@@ -1036,6 +1093,37 @@ def delete_persistent_volume(name, **kwargs):
             return None
         else:
             log.exception("Exception when calling CoreV1Api->delete_persistent_volume")
+            raise CommandExecutionError(exc)
+    finally:
+        _cleanup(**cfg)
+
+
+def delete_persistent_volume_claim(name, namespace="default", **kwargs):
+    """
+    Deletes the kubernetes persistent volume claim defined by name and namespace
+
+    CLI Example:
+
+    .. code-block:: bash
+
+        salt '*' kubernetes.delete_persistent_volume_claim name=pvc-name namespace=default
+    """
+    cfg = _setup_conn(**kwargs)
+    body = kubernetes.client.V1DeleteOptions()
+
+    try:
+        api_instance = kubernetes.client.CoreV1Api()
+        api_response = api_instance.delete_namespaced_persistent_volume_claim(
+            name=name, namespace=namespace, body=body
+        )
+        return api_response.to_dict()
+    except (ApiException, HTTPError) as exc:
+        if isinstance(exc, ApiException) and exc.status == 404:
+            return None
+        else:
+            log.exception(
+                "Exception when calling CoreV1Api->delete_namespaced_persistent_volume_claim"
+            )
             raise CommandExecutionError(exc)
     finally:
         _cleanup(**cfg)
@@ -1471,6 +1559,63 @@ def create_persistent_volume(
         _cleanup(**cfg)
 
 
+def create_persistent_volume_claim(
+    name,
+    namespace="default",
+    spec=None,
+    source=None,
+    template=None,
+    saltenv="base",
+    context=None,
+    **kwargs,
+):
+    """
+    Creates a persistent volume claim with the specified name, namespace and spec.
+
+    CLI Example:
+
+    .. code-block:: bash
+
+        salt '*' kubernetes.create_persistent_volume_claim name=pvc-name namespace=default spec='{"access_modes": ["ReadWriteOnce"], "resources": {"requests": {"storage": "1Gi"}}}'
+    """
+    if source:
+        src_obj = __read_and_render_yaml_file(source, template, saltenv, context)
+        if (
+            not isinstance(src_obj, dict)
+            or "kind" not in src_obj
+            or src_obj["kind"] != "PersistentVolumeClaim"
+        ):
+            raise CommandExecutionError("The source file must define a PersistentVolumeClaim")
+        if "spec" in src_obj:
+            spec = src_obj["spec"]
+    elif spec is None:
+        spec = {}
+
+    spec = __validate_persistent_volume_claim_spec(spec)
+
+    body = kubernetes.client.V1PersistentVolumeClaim(
+        metadata=kubernetes.client.V1ObjectMeta(name=name, namespace=namespace),
+        spec=kubernetes.client.V1PersistentVolumeClaimSpec(**spec),
+    )
+
+    cfg = _setup_conn(**kwargs)
+
+    try:
+        api_instance = kubernetes.client.CoreV1Api()
+        api_response = api_instance.create_namespaced_persistent_volume_claim(namespace, body)
+        return api_response.to_dict()
+    except (ApiException, HTTPError) as exc:
+        if isinstance(exc, ApiException) and exc.status == 404:
+            return None
+        else:
+            log.exception(
+                "Exception when calling CoreV1Api->create_namespaced_persistent_volume_claim"
+            )
+            raise CommandExecutionError(exc)
+    finally:
+        _cleanup(**cfg)
+
+
 def replace_deployment(
     name, metadata, spec, source, template, saltenv, namespace="default", context=None, **kwargs
 ):
@@ -1744,6 +1889,82 @@ def replace_replicaset(
         else:
             log.exception("Exception when calling AppsV1Api->replace_namespaced_replica_set")
             raise CommandExecutionError(exc)
+    finally:
+        _cleanup(**cfg)
+
+
+def replace_persistent_volume_claim(
+    name,
+    namespace="default",
+    spec=None,
+    source=None,
+    template=None,
+    saltenv="base",
+    context=None,
+    **kwargs,
+):
+    """
+    Replaces an existing persistent volume claim with the specified name and namespace.
+
+    Note that most PVC fields are immutable after creation except:
+    - volumeAttributesClassName (for bound claims)
+    - resources.requests.storage (can only be increased)
+
+    CLI Example:
+
+    .. code-block:: bash
+
+        salt '*' kubernetes.replace_persistent_volume_claim name=pvc-name namespace=default spec='{"volumeAttributesClassName": "my-class"}'
+    """
+    if source:
+        src_obj = __read_and_render_yaml_file(source, template, saltenv, context)
+        if (
+            not isinstance(src_obj, dict)
+            or "kind" not in src_obj
+            or src_obj["kind"] != "PersistentVolumeClaim"
+        ):
+            raise CommandExecutionError("The source file must define a PersistentVolumeClaim")
+        if "spec" in src_obj:
+            spec = src_obj["spec"]
+    elif spec is None:
+        spec = {}
+
+    cfg = _setup_conn(**kwargs)
+
+    try:
+        api_instance = kubernetes.client.CoreV1Api()
+
+        # Get existing PVC
+        existing_pvc = api_instance.read_namespaced_persistent_volume_claim(name, namespace)
+        if not existing_pvc:
+            raise CommandExecutionError(f"PVC {name} not found in namespace {namespace}")
+
+        # Validate immutable field changes
+        is_valid, error_msg = __validate_pvc_immutable_fields(existing_pvc.spec, spec)
+        if not is_valid:
+            raise CommandExecutionError(error_msg)
+
+        # Create body with validated spec
+        body = kubernetes.client.V1PersistentVolumeClaim(
+            metadata=kubernetes.client.V1ObjectMeta(name=name, namespace=namespace),
+            spec=kubernetes.client.V1PersistentVolumeClaimSpec(**spec),
+        )
+
+        # Preserve resource version
+        body.metadata.resource_version = existing_pvc.metadata.resource_version
+
+        api_response = api_instance.replace_namespaced_persistent_volume_claim(
+            name, namespace, body
+        )
+        return api_response.to_dict()
+
+    except ApiException as exc:
+        if exc.status == 422:
+            # Let through the API validation error
+            raise CommandExecutionError(f"Invalid PVC update: {exc.reason}")
+    except Exception as exc:
+        log.exception("Exception when replacing persistent volume claim")
+        raise CommandExecutionError(exc)
     finally:
         _cleanup(**cfg)
 
@@ -2269,3 +2490,68 @@ def __validate_persistent_volume_spec(spec):
                 )
 
     return spec
+
+
+def __validate_persistent_volume_claim_spec(spec):
+    """
+    Validates the persistent volume claim spec ensuring required fields are present and valid.
+    """
+    if not isinstance(spec, dict):
+        raise CommandExecutionError("Persistent volume claim spec must be a dictionary")
+
+    # Validate required resources field
+    if "resources" not in spec:
+        raise CommandExecutionError("spec.resources is required for persistent volume claims")
+
+    if not isinstance(spec["resources"], dict):
+        raise CommandExecutionError("spec.resources must be a dictionary")
+
+    if "requests" not in spec["resources"]:
+        raise CommandExecutionError(
+            "spec.resources.requests is required for persistent volume claims"
+        )
+
+    if "storage" not in spec["resources"]["requests"]:
+        raise CommandExecutionError(
+            "spec.resources.requests.storage is required for persistent volume claims"
+        )
+
+    # Validate access modes if present
+    if "access_modes" in spec:
+        valid_modes = {"ReadOnlyMany", "ReadWriteMany", "ReadWriteOnce", "ReadWriteOncePod"}
+        if not isinstance(spec["access_modes"], (list, tuple)):
+            raise CommandExecutionError("access_modes must be a list")
+        for mode in spec["access_modes"]:
+            if mode not in valid_modes:
+                raise CommandExecutionError(
+                    f"Invalid access mode '{mode}'. Must be one of: {', '.join(sorted(valid_modes))}"
+                )
+
+    return spec
+
+
+def __validate_pvc_immutable_fields(existing_spec, new_spec):
+    """
+    Validates that no immutable PVC fields are being changed.
+    Returns tuple of (is_valid, error_message).
+
+    Most PVC fields are immutable after creation except
+    resources.requests and volumeAttributesClassName for bound claims
+    """
+    # Convert existing spec from kubernetes object to dict if needed
+    if not isinstance(existing_spec, dict):
+        existing_spec = existing_spec.to_dict()
+
+    immutable_fields = {
+        "accessModes",
+        "selector",
+        "volumeMode",
+        "volumeName",
+        "storageClassName",
+    }
+
+    for field in immutable_fields:
+        if field in new_spec and new_spec.get(field) != existing_spec.get(field):
+            return False, f"Cannot modify immutable field '{field}' in PVC spec"
+
+    return True, None

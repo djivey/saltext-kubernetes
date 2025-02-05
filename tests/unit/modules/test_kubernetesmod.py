@@ -17,6 +17,8 @@ from kubernetes.client import V1Container
 from kubernetes.client import V1DeploymentSpec
 from kubernetes.client import V1PodSpec
 from kubernetes.client import V1PodTemplateSpec
+from kubernetes.client.rest import ApiException
+from salt.exceptions import CommandExecutionError
 from salt.modules import config
 
 from saltext.kubernetes.modules import kubernetesmod as kubernetes
@@ -660,3 +662,195 @@ spec:
             assert (
                 kubernetes.kubernetes.client.CoreV1Api().create_persistent_volume().to_dict.called
             )
+
+
+def test_persistent_volume_claims():
+    """Test persistent_volume_claims listing"""
+    with mock_kubernetes_library() as mock_kubernetes_lib:
+        mock_kubernetes_lib.client.CoreV1Api.return_value = Mock(
+            **{
+                "list_namespaced_persistent_volume_claim.return_value.to_dict.return_value": {
+                    "items": [{"metadata": {"name": "mock_pvc_name"}}]
+                }
+            }
+        )
+        assert kubernetes.persistent_volume_claims() == ["mock_pvc_name"]
+        assert (
+            kubernetes.kubernetes.client.CoreV1Api()
+            .list_namespaced_persistent_volume_claim()
+            .to_dict.called
+        )
+
+
+def test_show_persistent_volume_claim():
+    """Test persistent_volume_claim detail retrieval"""
+    with mock_kubernetes_library() as mock_kubernetes_lib:
+        mock_kubernetes_lib.client.CoreV1Api.return_value = Mock(
+            **{
+                "read_namespaced_persistent_volume_claim.return_value.to_dict.return_value": {
+                    "metadata": {"name": "mock_pvc_name"},
+                    "spec": {
+                        "access_modes": ["ReadWriteOnce"],
+                        "resources": {"requests": {"storage": "1Gi"}},
+                    },
+                }
+            }
+        )
+        assert kubernetes.show_persistent_volume_claim("mock_pvc_name") == {
+            "metadata": {"name": "mock_pvc_name"},
+            "spec": {
+                "access_modes": ["ReadWriteOnce"],
+                "resources": {"requests": {"storage": "1Gi"}},
+            },
+        }
+        assert (
+            kubernetes.kubernetes.client.CoreV1Api()
+            .read_namespaced_persistent_volume_claim()
+            .to_dict.called
+        )
+
+
+def test_create_persistent_volume_claim():
+    """Test persistent_volume_claim creation"""
+    spec = {
+        "access_modes": ["ReadWriteOnce"],
+        "resources": {"requests": {"storage": "1Gi"}},
+    }
+
+    with mock_kubernetes_library() as mock_kubernetes_lib:
+        mock_kubernetes_lib.client.V1ObjectMeta = MagicMock()
+        mock_kubernetes_lib.client.V1PersistentVolumeClaimSpec = MagicMock()
+        mock_kubernetes_lib.client.V1PersistentVolumeClaim = MagicMock()
+        mock_kubernetes_lib.client.CoreV1Api.return_value = Mock(
+            **{"create_namespaced_persistent_volume_claim.return_value.to_dict.return_value": {}}
+        )
+
+        result = kubernetes.create_persistent_volume_claim(name="test-pvc", spec=spec)
+        assert result == {}
+        assert (
+            kubernetes.kubernetes.client.CoreV1Api()
+            .create_namespaced_persistent_volume_claim()
+            .to_dict.called
+        )
+
+
+def test_delete_persistent_volume_claim():
+    """Test persistent_volume_claim deletion"""
+    with mock_kubernetes_library() as mock_kubernetes_lib:
+        mock_kubernetes_lib.client.V1DeleteOptions = Mock(return_value="")
+        mock_kubernetes_lib.client.CoreV1Api.return_value = Mock(
+            **{
+                "delete_namespaced_persistent_volume_claim.return_value.to_dict.return_value": {
+                    "message": "Deleted"
+                }
+            }
+        )
+        result = kubernetes.delete_persistent_volume_claim("test-pvc")
+        assert result == {"message": "Deleted"}
+        assert (
+            kubernetes.kubernetes.client.CoreV1Api()
+            .delete_namespaced_persistent_volume_claim()
+            .to_dict.called
+        )
+
+
+def test_replace_persistent_volume_claim():
+    """Test persistent_volume_claim replacement with immutability checks"""
+    name = "test-pvc"
+    namespace = "default"
+
+    existing_spec = {
+        "access_modes": ["ReadWriteOnce"],
+        "resources": {"requests": {"storage": "1Gi"}},
+    }
+    new_spec = {
+        "resources": {"requests": {"storage": "2Gi"}},  # Only changing mutable field
+    }
+
+    # Create mock existing PVC object with proper structure
+    mock_existing_pvc = MagicMock()
+    mock_existing_pvc.spec = MagicMock(to_dict=lambda: existing_spec)
+    mock_existing_pvc.metadata = MagicMock(resource_version="123")
+
+    mock_api_instance = MagicMock()
+    mock_api_instance.read_namespaced_persistent_volume_claim.return_value = mock_existing_pvc
+    mock_api_instance.replace_namespaced_persistent_volume_claim.return_value = MagicMock(
+        to_dict=lambda: {"metadata": {"name": name}}
+    )
+
+    with mock_kubernetes_library() as mock_kubernetes_lib:
+        mock_kubernetes_lib.client.CoreV1Api.return_value = mock_api_instance
+        mock_kubernetes_lib.client.V1ObjectMeta = MagicMock()
+        mock_kubernetes_lib.client.V1PersistentVolumeClaimSpec = MagicMock()
+        mock_kubernetes_lib.client.V1PersistentVolumeClaim = MagicMock()
+
+        result = kubernetes.replace_persistent_volume_claim(name, namespace, spec=new_spec)
+        assert result == {"metadata": {"name": name}}
+
+
+def test_replace_persistent_volume_claim_immutable_field():
+    """Test PVC replacement fails when modifying immutable fields"""
+    name = "test-pvc"
+    namespace = "default"
+
+    existing_spec = {
+        "access_modes": ["ReadWriteOnce"],
+        "resources": {"requests": {"storage": "1Gi"}},
+    }
+    new_spec = {
+        "access_modes": ["ReadWriteMany"],  # Trying to modify immutable field
+        "resources": {"requests": {"storage": "1Gi"}},
+    }
+
+    # Create mock existing PVC object with proper structure
+    mock_existing_pvc = MagicMock()
+    mock_existing_pvc.spec = MagicMock(to_dict=lambda: existing_spec)
+
+    mock_api_instance = MagicMock()
+    mock_api_instance.read_namespaced_persistent_volume_claim.return_value = mock_existing_pvc
+    mock_api_instance.replace_namespaced_persistent_volume_claim.side_effect = ApiException(
+        status=422, reason="Invalid request: immutable field change"
+    )
+
+    with mock_kubernetes_library() as mock_kubernetes_lib:
+        mock_kubernetes_lib.client.CoreV1Api.return_value = mock_api_instance
+        mock_kubernetes_lib.client.V1ObjectMeta = MagicMock()
+        mock_kubernetes_lib.client.V1PersistentVolumeClaimSpec = MagicMock()
+        mock_kubernetes_lib.client.V1PersistentVolumeClaim = MagicMock()
+
+        with pytest.raises((CommandExecutionError, ApiException)) as exc:
+            kubernetes.replace_persistent_volume_claim(name, namespace, spec=new_spec)
+        assert "Invalid request: immutable field change" in str(exc.value)
+
+
+def test_validate_persistent_volume_claim_spec():
+    """Test PVC spec validation"""
+    # Test valid spec
+    valid_spec = {
+        "access_modes": ["ReadWriteOnce"],
+        "resources": {"requests": {"storage": "1Gi"}},
+    }
+    result = kubernetes.__validate_persistent_volume_claim_spec(valid_spec)
+    assert result == valid_spec
+
+    # Test missing required fields
+    with pytest.raises(CommandExecutionError) as exc:
+        kubernetes.__validate_persistent_volume_claim_spec({})
+    assert "spec.resources is required" in str(exc.value)
+
+    with pytest.raises(CommandExecutionError) as exc:
+        kubernetes.__validate_persistent_volume_claim_spec({"resources": {}})
+    assert "spec.resources.requests is required" in str(exc.value)
+
+    with pytest.raises(CommandExecutionError) as exc:
+        kubernetes.__validate_persistent_volume_claim_spec({"resources": {"requests": {}}})
+    assert "spec.resources.requests.storage is required" in str(exc.value)
+
+    # Test invalid access modes
+    invalid_spec = {
+        "access_modes": ["InvalidMode"],
+        "resources": {"requests": {"storage": "1Gi"}},
+    }
+    with pytest.raises(CommandExecutionError) as exc:
+        kubernetes.__validate_persistent_volume_claim_spec(invalid_spec)
+    assert "Invalid access mode" in str(exc.value)

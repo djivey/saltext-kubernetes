@@ -3,6 +3,7 @@ import sys
 import time
 
 import pytest
+from kubernetes.client.rest import ApiException
 from salt.exceptions import CommandExecutionError
 
 log = logging.getLogger(__name__)
@@ -1621,6 +1622,8 @@ def test_persistent_volume_lifecycle(kubernetes, caplog):
         result = kubernetes.delete_persistent_volume(test_pv)
         assert isinstance(result, dict)
 
+        time.sleep(2)
+
         # Verify deletion
         result = kubernetes.show_persistent_volume(test_pv)
         assert result is None
@@ -1684,3 +1687,175 @@ spec:
 
         finally:
             kubernetes.delete_persistent_volume(test_pv)
+
+
+def test_persistent_volume_claims(kubernetes, caplog):
+    """Test listing persistent volume claims"""
+    caplog.set_level(logging.INFO)
+
+    # Create a test PVC first
+    test_pvc = "salt-test-pvc-list"
+    namespace = "default"
+    spec = {
+        "access_modes": ["ReadWriteOnce"],
+        "resources": {"requests": {"storage": "1Gi"}},
+    }
+
+    try:
+        # Create PVC to list
+        result = kubernetes.create_persistent_volume_claim(test_pvc, namespace=namespace, spec=spec)
+        assert isinstance(result, dict)
+
+        # List PVCs
+        result = kubernetes.persistent_volume_claims(namespace=namespace)
+        assert isinstance(result, list)
+        assert test_pvc in result
+
+    finally:
+        kubernetes.delete_persistent_volume_claim(test_pvc, namespace)
+
+
+def test_persistent_volume_claim_lifecycle(kubernetes, caplog):
+    """Test the complete lifecycle of a persistent volume claim"""
+    caplog.set_level(logging.INFO)
+    test_pvc = "salt-test-pvc-lifecycle"
+    namespace = "default"
+
+    # PVC spec with snake_case keys
+    spec = {
+        "access_modes": ["ReadWriteOnce"],
+        "resources": {"requests": {"storage": "1Gi"}},
+        "storage_class_name": "standard",
+    }
+
+    try:
+        # Create PVC
+        result = kubernetes.create_persistent_volume_claim(
+            name=test_pvc,
+            namespace=namespace,
+            spec=spec,
+        )
+        assert isinstance(result, dict)
+        assert result["metadata"]["name"] == test_pvc
+
+        # Wait for PVC to be accessible
+        for _ in range(5):
+            if kubernetes.show_persistent_volume_claim(test_pvc, namespace):
+                break
+            time.sleep(1)
+        else:
+            pytest.fail("PVC was not created")
+
+        # Show PVC details
+        result = kubernetes.show_persistent_volume_claim(test_pvc, namespace)
+        assert isinstance(result, dict)
+        assert result["metadata"]["name"] == test_pvc
+        assert result["spec"]["resources"]["requests"]["storage"] == "1Gi"
+        assert "ReadWriteOnce" in result["spec"]["access_modes"]
+
+        # List PVCs and verify ours exists
+        pvc_list = kubernetes.persistent_volume_claims(namespace=namespace)
+        assert isinstance(pvc_list, list)
+        assert test_pvc in pvc_list
+
+        # Note: PVC specs are largely immutable after creation. Only the following can be modified:
+        # resources.requests.storage (can only be increased)
+        # volumeAttributesClassName (for bound claims)
+        # So we'll skip the replacement test
+
+        # Delete PVC
+        result = kubernetes.delete_persistent_volume_claim(test_pvc, namespace)
+        assert isinstance(result, dict)
+
+        # Verify PVC is gone with retry
+        for _ in range(10):
+            if not kubernetes.show_persistent_volume_claim(test_pvc, namespace):
+                break
+            time.sleep(1)
+        else:
+            pytest.fail("PVC still exists after deletion")
+
+    finally:
+        # Cleanup
+        kubernetes.delete_persistent_volume_claim(test_pvc, namespace)
+
+
+def test_show_nonexistent_persistent_volume_claim(kubernetes, caplog):
+    """Test showing a PVC that doesn't exist returns None"""
+    caplog.set_level(logging.INFO)
+    result = kubernetes.show_persistent_volume_claim("salt-test-nonexistent-pvc", "default")
+    assert result is None
+
+
+def test_delete_nonexistent_persistent_volume_claim(kubernetes, caplog):
+    """Test deleting a PVC that doesn't exist returns None"""
+    caplog.set_level(logging.INFO)
+    result = kubernetes.delete_persistent_volume_claim("salt-test-nonexistent-pvc", "default")
+    assert result is None
+
+
+def test_persistent_volume_claim_with_source_file(kubernetes, caplog):
+    """Test PVC creation using YAML source file"""
+    caplog.set_level(logging.INFO)
+    test_pvc = "salt-test-pvc-source"
+    namespace = "default"
+
+    # Create temp YAML file
+    pvc_yaml = """
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: test-pvc
+  namespace: default
+spec:
+  access_modes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 1Gi
+  storage_class_name: standard
+"""
+    try:
+        with pytest.helpers.temp_file("test_pvc.yaml", pvc_yaml) as source:
+            # Create PVC from source
+            result = kubernetes.create_persistent_volume_claim(
+                name=test_pvc,
+                namespace=namespace,
+                spec={},  # Empty spec since it comes from file
+                source=str(source),
+            )
+            assert isinstance(result, dict)
+            assert result["metadata"]["name"] == test_pvc
+
+            # Verify PVC exists
+            assert kubernetes.show_persistent_volume_claim(test_pvc, namespace) is not None
+
+    finally:
+        kubernetes.delete_persistent_volume_claim(test_pvc, namespace)
+
+
+def test_persistent_volume_claim_invalid_specs(kubernetes, caplog):
+    """Test PVC validation for different invalid specifications"""
+    caplog.set_level(logging.INFO)
+    test_pvc = "salt-test-invalid-pvc"
+    namespace = "default"
+
+    invalid_specs = [
+        # Missing required resources field
+        {"access_modes": ["ReadWriteOnce"]},
+        # Missing storage request
+        {"resources": {"requests": {}}, "access_modes": ["ReadWriteOnce"]},
+        # Invalid access mode
+        {"access_modes": ["InvalidMode"], "resources": {"requests": {"storage": "1Gi"}}},
+    ]
+
+    for spec in invalid_specs:
+        with pytest.raises((CommandExecutionError, ApiException)):
+            kubernetes.create_persistent_volume_claim(
+                name=test_pvc,
+                namespace=namespace,
+                spec=spec,
+            )
+
+    # Verify no PVC was created
+    assert test_pvc not in kubernetes.persistent_volume_claims(namespace=namespace)

@@ -997,3 +997,199 @@ test_persistent_volume:
         finally:
             # Cleanup
             salt_call_cli.run("state.single", "kubernetes.persistent_volume_absent", name=test_pv)
+
+    def test_persistent_volume_claim_present_absent(self, salt_call_cli, state_tree):
+        """Test persistent volume claim creation and deletion via states"""
+        test_pvc = "test-pvc-state"
+
+        # Create PVC state file
+        state_file = state_tree / "test_pvc.sls"
+        state_file.write_text(
+            f"""
+test_persistent_volume_claim:
+  kubernetes.persistent_volume_claim_present:
+    - name: {test_pvc}
+    - namespace: default
+    - spec:
+        access_modes:
+          - ReadWriteOnce
+        resources:
+          requests:
+            storage: 1Gi
+        storage_class_name: standard
+"""
+        )
+
+        # Apply initial PVC present state
+        ret = salt_call_cli.run("state.apply", "test_pvc")
+        assert ret.returncode == 0
+        assert ret.data
+        state_ret = ret.data[next(iter(ret.data))]
+        assert state_ret["result"] is True
+        assert state_ret["changes"]
+
+        # Verify initial creation changes
+        pvc_new = state_ret["changes"][f"default.{test_pvc}"]["new"]
+        assert pvc_new["spec"]["resources"]["requests"]["storage"] == "1Gi"
+        assert "ReadWriteOnce" in pvc_new["spec"]["access_modes"]
+
+        # Test PVC removal
+        state_file.write_text(
+            f"""
+remove_persistent_volume_claim:
+  kubernetes.persistent_volume_claim_absent:
+    - name: {test_pvc}
+    - namespace: default
+"""
+        )
+
+        ret = salt_call_cli.run("state.apply", "test_pvc")
+        assert ret.returncode == 0
+        assert ret.data
+        state_ret = ret.data[next(iter(ret.data))]
+        assert state_ret["result"] is True
+        assert state_ret["changes"]
+        assert "kubernetes.persistent_volume_claim" in state_ret["changes"]
+
+        # Verify PVC is gone
+        ret = salt_call_cli.run(
+            "kubernetes.show_persistent_volume_claim", name=test_pvc, namespace="default"
+        )
+        assert ret.data is None
+
+    def test_persistent_volume_claim_with_template(self, salt_call_cli, state_tree):
+        """Test persistent volume claim creation using template"""
+        test_pvc = "test-pvc-template"
+
+        # Create template file
+        template_file = state_tree / "pvc-template.yaml.jinja"
+        template_file.write_text(
+            """
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ name }}
+  namespace: {{ namespace }}
+  annotations:
+    storage.kubernetes.io/storage-class: {{ storage_class }}
+spec:
+  access_modes:
+    - {{ access_mode }}
+  resources:
+    requests:
+      storage: {{ storage_size }}
+"""
+        )
+
+        # Create state file using template
+        state_file = state_tree / "test_pvc_template.sls"
+        state_file.write_text(
+            f"""
+test_persistent_volume_claim:
+  kubernetes.persistent_volume_claim_present:
+    - name: {test_pvc}
+    - namespace: default
+    - source: salt://pvc-template.yaml.jinja
+    - template: jinja
+    - context:
+        name: {test_pvc}
+        namespace: default
+        storage_size: 2Gi
+        access_mode: ReadWriteOnce
+        storage_class: standard
+"""
+        )
+
+        try:
+            # Apply state
+            ret = salt_call_cli.run("state.apply", "test_pvc_template")
+            assert ret.returncode == 0
+            assert ret.data
+            state_ret = ret.data[next(iter(ret.data))]
+            assert state_ret["result"] is True
+            assert state_ret["changes"]
+
+            # Verify changes structure
+            pvc_changes = state_ret["changes"][f"default.{test_pvc}"]["new"]
+            assert pvc_changes["spec"]["resources"]["requests"]["storage"] == "2Gi"
+            assert "ReadWriteOnce" in pvc_changes["spec"]["access_modes"]
+
+            # Wait briefly for the PVC to be fully created
+            time.sleep(2)
+
+            # Verify PVC was created correctly
+            ret = salt_call_cli.run(
+                "kubernetes.show_persistent_volume_claim", name=test_pvc, namespace="default"
+            )
+            assert ret.returncode == 0
+            assert ret.data["metadata"]["name"] == test_pvc
+            assert ret.data["spec"]["resources"]["requests"]["storage"] == "2Gi"
+
+        finally:
+            # Cleanup
+            salt_call_cli.run(
+                "state.single",
+                "kubernetes.persistent_volume_claim_absent",
+                name=test_pvc,
+                namespace="default",
+            )
+
+    def test_persistent_volume_claim_test_mode(self, salt_call_cli, state_tree):
+        """Test persistent volume claim states in test mode"""
+        test_pvc = "test-pvc-testmode"
+
+        # Create state file
+        state_file = state_tree / "test_pvc.sls"
+        state_file.write_text(
+            f"""
+test_persistent_volume_claim:
+  kubernetes.persistent_volume_claim_present:
+    - name: {test_pvc}
+    - namespace: default
+    - spec:
+        access_modes:
+          - ReadWriteOnce
+        resources:
+          requests:
+            storage: 1Gi
+"""
+        )
+
+        # Test create with test=True
+        ret = salt_call_cli.run("state.apply", "test_pvc", test=True)
+        assert ret.returncode == 0
+        state_ret = ret.data[next(iter(ret.data))]
+        assert state_ret["result"] is None
+        assert "is going to be created" in state_ret["comment"]
+        assert not state_ret["changes"]
+
+        # Create PVC
+        ret = salt_call_cli.run("state.apply", "test_pvc")
+        assert ret.returncode == 0
+
+        try:
+            # Test delete with test=True
+            state_file.write_text(
+                f"""
+remove_persistent_volume_claim:
+  kubernetes.persistent_volume_claim_absent:
+    - name: {test_pvc}
+    - namespace: default
+"""
+            )
+
+            ret = salt_call_cli.run("state.apply", "test_pvc", test=True)
+            assert ret.returncode == 0
+            state_ret = ret.data[next(iter(ret.data))]
+            assert state_ret["result"] is None
+            assert "is going to be deleted" in state_ret["comment"]
+            assert not state_ret["changes"]
+
+        finally:
+            # Cleanup
+            salt_call_cli.run(
+                "state.single",
+                "kubernetes.persistent_volume_claim_absent",
+                name=test_pvc,
+                namespace="default",
+            )

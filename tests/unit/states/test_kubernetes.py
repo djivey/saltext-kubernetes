@@ -1225,3 +1225,154 @@ spec:
                     "name": "test-pv",
                     "result": True,
                 }
+
+
+def test_persistent_volume_claim_absent__noop_test_true():
+    """Test PVC absent with test=True when PVC does not exist"""
+    with mock_func("show_persistent_volume_claim", return_value=None, test=True):
+        actual = kubernetes.persistent_volume_claim_absent(name="test-pvc")
+        assert actual == {
+            "comment": "The persistent volume claim does not exist",
+            "changes": {},
+            "name": "test-pvc",
+            "result": None,
+        }
+
+
+def test_persistent_volume_claim_absent__delete_test_true():
+    """Test PVC absent with test=True when PVC exists"""
+    with mock_func(
+        "show_persistent_volume_claim", return_value={"metadata": {"name": "test-pvc"}}, test=True
+    ):
+        actual = kubernetes.persistent_volume_claim_absent(name="test-pvc")
+        assert actual == {
+            "comment": "The persistent volume claim is going to be deleted",
+            "changes": {},
+            "name": "test-pvc",
+            "result": None,
+        }
+
+
+def test_persistent_volume_claim_absent__delete():
+    """Test successful PVC deletion"""
+    with mock_func("show_persistent_volume_claim", return_value={"metadata": {"name": "test-pvc"}}):
+        with mock_func("delete_persistent_volume_claim", return_value={"message": None}):
+            actual = kubernetes.persistent_volume_claim_absent(name="test-pvc")
+            assert actual == {
+                "comment": "Persistent volume claim deleted",
+                "changes": {
+                    "kubernetes.persistent_volume_claim": {"new": "absent", "old": "present"}
+                },
+                "name": "test-pvc",
+                "result": True,
+            }
+
+
+def test_persistent_volume_claim_present__create_test_true():
+    """Test PVC creation with test=True"""
+    with mock_func("show_persistent_volume_claim", return_value=None, test=True):
+        actual = kubernetes.persistent_volume_claim_present(
+            name="test-pvc",
+            spec={
+                "access_modes": ["ReadWriteOnce"],
+                "resources": {"requests": {"storage": "1Gi"}},
+            },
+        )
+        assert actual == {
+            "comment": "The persistent volume claim is going to be created",
+            "changes": {},
+            "name": "test-pvc",
+            "result": None,
+        }
+
+
+def test_persistent_volume_claim_present__create():
+    """Test successful PVC creation"""
+    spec = {
+        "access_modes": ["ReadWriteOnce"],
+        "resources": {"requests": {"storage": "1Gi"}},
+    }
+
+    with mock_func("show_persistent_volume_claim", return_value=None):
+        with mock_func(
+            "create_persistent_volume_claim",
+            return_value={"metadata": {"name": "test-pvc"}, "spec": spec},
+        ):
+            actual = kubernetes.persistent_volume_claim_present(
+                name="test-pvc",
+                spec=spec,
+            )
+            assert actual == {
+                "comment": "",
+                "changes": {
+                    "default.test-pvc": {
+                        "old": {},
+                        "new": {"metadata": {"name": "test-pvc"}, "spec": spec},
+                    }
+                },
+                "name": "test-pvc",
+                "result": True,
+            }
+
+
+def test_persistent_volume_claim_present__create_with_template():
+    """Test PVC creation using template with context"""
+    template_content = """
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ context.name }}
+spec:
+  access_modes:
+    - {{ context.access_mode }}
+  resources:
+    requests:
+      storage: {{ context.storage }}
+"""
+    context = {"name": "test-pvc", "access_mode": "ReadWriteOnce", "storage": "1Gi"}
+
+    with mock_func("show_persistent_volume_claim", return_value=None):
+        with (
+            patch("salt.utils.files.fopen", mock_open(read_data=template_content)),
+            patch(
+                "salt.utils.templates.TEMPLATE_REGISTRY",
+                {
+                    "jinja": MagicMock(
+                        return_value={
+                            "result": True,
+                            "data": template_content,
+                        }
+                    )
+                },
+            ),
+        ):
+            with mock_func("create_persistent_volume_claim", return_value={}):
+                ret = kubernetes.persistent_volume_claim_present(
+                    name="test-pvc",
+                    source="salt://k8s/pvc.yaml.jinja",
+                    template="jinja",
+                    context=context,
+                )
+                assert ret["result"] is True
+
+
+def test_persistent_volume_claim_present__replace_test_true():
+    """Test PVC replacement with test=True"""
+    with mock_func(
+        "show_persistent_volume_claim",
+        return_value={"metadata": {"name": "test-pvc"}},
+        test=True,
+    ):
+        actual = kubernetes.persistent_volume_claim_present(
+            name="test-pvc",
+            spec={
+                "access_modes": ["ReadWriteOnce"],
+                "resources": {"requests": {"storage": "2Gi"}},
+            },
+        )
+        assert actual == {
+            "comment": "The persistent volume claim is going to be replaced",
+            "changes": {},
+            "name": "test-pvc",
+            "result": None,
+        }

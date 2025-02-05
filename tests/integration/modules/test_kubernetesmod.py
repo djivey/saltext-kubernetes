@@ -703,3 +703,105 @@ class TestKubernetesModule:
             assert result.returncode != 0
             assert result.stderr != ""
             assert any(x in result.stderr.lower() for x in ["invalid", "error", "required"])
+
+    def test_persistent_volume_claims(self, salt_call_cli):
+        """Test persistent volume claim operations"""
+        pvc = {
+            "metadata": {
+                "name": "test-pvc",
+                "namespace": "default",
+            },
+            "spec": {
+                "access_modes": ["ReadWriteOnce"],
+                "resources": {"requests": {"storage": "1Gi"}},
+                "storage_class_name": "standard",
+            },
+        }
+
+        try:
+            # List persistent volume claims
+            ret = salt_call_cli.run("kubernetes.persistent_volume_claims")
+            assert ret.returncode == 0
+            assert isinstance(ret.data, list)
+
+            # Create persistent volume claim
+            ret = salt_call_cli.run(
+                "kubernetes.create_persistent_volume_claim",
+                name=pvc["metadata"]["name"],
+                namespace=pvc["metadata"]["namespace"],
+                spec=pvc["spec"],
+            )
+            assert ret.returncode == 0
+            assert ret.data["metadata"]["name"] == pvc["metadata"]["name"]
+
+            # Allow PVC to be created
+            time.sleep(2)
+
+            # Show PVC
+            ret = salt_call_cli.run(
+                "kubernetes.show_persistent_volume_claim",
+                name=pvc["metadata"]["name"],
+                namespace=pvc["metadata"]["namespace"],
+            )
+            assert ret.returncode == 0
+            assert ret.data["metadata"]["name"] == pvc["metadata"]["name"]
+            assert ret.data["spec"]["resources"]["requests"]["storage"] == "1Gi"
+            assert "ReadWriteOnce" in ret.data["spec"]["access_modes"]
+
+            # Check it appears in list
+            ret = salt_call_cli.run(
+                "kubernetes.persistent_volume_claims", namespace=pvc["metadata"]["namespace"]
+            )
+            assert ret.returncode == 0
+            assert pvc["metadata"]["name"] in ret.data
+
+        finally:
+            # Cleanup - delete PVC
+            ret = salt_call_cli.run(
+                "kubernetes.delete_persistent_volume_claim",
+                name=pvc["metadata"]["name"],
+                namespace=pvc["metadata"]["namespace"],
+            )
+            assert ret.returncode == 0
+
+            # Wait for deletion to complete
+            time.sleep(2)
+
+            # Verify PVC is gone
+            ret = salt_call_cli.run(
+                "kubernetes.show_persistent_volume_claim",
+                name=pvc["metadata"]["name"],
+                namespace=pvc["metadata"]["namespace"],
+            )
+            assert ret.data is None
+
+    def test_invalid_persistent_volume_claim(self, salt_call_cli):
+        """Test creating persistent volume claim with invalid specifications"""
+        invalid_pvc = {
+            "metadata": {
+                "name": "test-invalid-pvc",
+                "namespace": "default",
+            },
+            "spec": {
+                "access_modes": ["InvalidMode"],
+                "resources": {"requests": {"storage": "1Gi"}},
+            },
+        }
+
+        # Attempt to create PVC with invalid spec
+        ret = salt_call_cli.run(
+            "kubernetes.create_persistent_volume_claim",
+            name=invalid_pvc["metadata"]["name"],
+            namespace=invalid_pvc["metadata"]["namespace"],
+            spec=invalid_pvc["spec"],
+        )
+        assert ret.returncode != 0
+        assert "error" in ret.stderr.lower()
+
+        # Verify PVC was not created
+        ret = salt_call_cli.run(
+            "kubernetes.show_persistent_volume_claim",
+            name=invalid_pvc["metadata"]["name"],
+            namespace=invalid_pvc["metadata"]["namespace"],
+        )
+        assert ret.data is None

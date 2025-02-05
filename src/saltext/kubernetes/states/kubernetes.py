@@ -1256,3 +1256,172 @@ def persistent_volume_absent(name, **kwargs):
         ret["comment"] = f"Something went wrong, response: {res}"
 
     return ret
+
+
+def persistent_volume_claim_absent(name, namespace="default", **kwargs):
+    """
+    Ensures that the specified persistent volume claim is absent.
+
+    name
+        The name of the persistent volume claim
+
+    namespace
+        The namespace where the persistent volume claim exists.
+        Default is 'default'.
+
+    Example:
+
+    .. code-block:: yaml
+
+        remove-pvc:
+          kubernetes.persistent_volume_claim_absent:
+            - name: mysql-data
+            - namespace: databases
+    """
+    ret = {"name": name, "changes": {}, "result": False, "comment": ""}
+
+    pvc = __salt__["kubernetes.show_persistent_volume_claim"](name, namespace, **kwargs)
+
+    if pvc is None:
+        ret["result"] = True if not __opts__["test"] else None
+        ret["comment"] = "The persistent volume claim does not exist"
+        return ret
+
+    if __opts__["test"]:
+        ret["comment"] = "The persistent volume claim is going to be deleted"
+        ret["result"] = None
+        return ret
+
+    res = __salt__["kubernetes.delete_persistent_volume_claim"](name, namespace, **kwargs)
+    if res:
+        ret["result"] = True
+        ret["changes"] = {"kubernetes.persistent_volume_claim": {"new": "absent", "old": "present"}}
+        if res.get("message"):
+            ret["comment"] = res["message"]
+        else:
+            ret["comment"] = "Persistent volume claim deleted"
+    else:
+        ret["comment"] = f"Something went wrong, response: {res}"
+
+    return ret
+
+
+def persistent_volume_claim_present(
+    name,
+    namespace="default",
+    spec=None,
+    source="",
+    template="",
+    context=None,
+    saltenv="base",
+    **kwargs,
+):
+    """
+    Ensures that the persistent volume claim is present with the given configuration.
+
+    name
+        The name of the persistent volume claim.
+
+    namespace
+        The namespace holding the persistent volume claim. The 'default' one
+        is going to be used unless a different one is specified.
+
+    spec
+        The persistent volume claim specification structure. See the kubernetes
+        documentation for a complete list of options that can be used in the
+        spec.
+
+    source
+        A file containing the persistent volume claim configuration in the
+        official kubernetes format.
+
+    template
+        Template engine to be used to render the source file.
+
+    context
+        Variables to be passed into the template. Should include 'name'
+        when using templates.
+
+    saltenv
+        The salt environment to use. Defaults to 'base'.
+
+    Example:
+
+    .. code-block:: yaml
+
+        # Simple persistent volume claim
+        web-data:
+          kubernetes.persistent_volume_claim_present:
+            - name: web-data
+            - namespace: default
+            - spec:
+                access_modes:
+                  - ReadWriteOnce
+                resources:
+                  requests:
+                    storage: 1Gi
+
+        # Using a template file
+        database-data:
+          kubernetes.persistent_volume_claim_present:
+            - name: mysql-data
+            - namespace: databases
+            - source: salt://k8s/mysql-pvc.yaml.jinja
+            - template: jinja
+            - context:
+                storage_size: 5Gi
+                storage_class: fast-ssd
+    """
+    ret = {"name": name, "changes": {}, "result": False, "comment": ""}
+
+    if (spec or spec == {}) and source:
+        return _error(ret, "'source' cannot be used in combination with 'spec'")
+
+    if not spec and not source:
+        spec = {}
+
+    pvc = __salt__["kubernetes.show_persistent_volume_claim"](name, namespace, **kwargs)
+
+    if pvc is None:
+        if __opts__["test"]:
+            ret["result"] = None
+            ret["comment"] = "The persistent volume claim is going to be created"
+            return ret
+
+        res = __salt__["kubernetes.create_persistent_volume_claim"](
+            name=name,
+            namespace=namespace,
+            spec=spec,
+            source=source,
+            template=template,
+            saltenv=saltenv,
+            context=context,
+            **kwargs,
+        )
+        ret["changes"][f"{namespace}.{name}"] = {"old": {}, "new": res}
+        ret["result"] = True
+        return ret
+
+    if __opts__["test"]:
+        ret["result"] = None
+        ret["comment"] = "The persistent volume claim is going to be replaced"
+        return ret
+
+    # TODO: improve checks for actual changes needed
+    log.info("Attempting to replace the persistent volume claim")
+    ret["comment"] = "The persistent volume claim already exists. Attempting to replace"
+    res = __salt__["kubernetes.replace_persistent_volume_claim"](
+        name=name,
+        namespace=namespace,
+        spec=spec,
+        source=source,
+        template=template,
+        saltenv=saltenv,
+        context=context,
+        **kwargs,
+    )
+
+    ret["changes"] = {"spec": spec}
+    ret["result"] = True
+
+    return ret
