@@ -242,6 +242,41 @@ def replicaset_template(state_tree):
         yield f"salt://{sls}.yml.jinja"
 
 
+@pytest.fixture
+def persistent_volume_template(state_tree):
+    """Fixture providing persistent volume template"""
+    sls = "k8s/pv-template"
+    contents = dedent(
+        """
+        apiVersion: v1
+        kind: PersistentVolume
+        metadata:
+          name: {{ name }}
+          labels:
+            {% for key, value in labels.items() %}
+            {{ key }}: {{ value }}
+            {% endfor %}
+        spec:
+          capacity:
+            storage: {{ storage }}
+          access_modes:
+            {% for mode in access_modes %}
+            - {{ mode }}
+            {% endfor %}
+          persistent_volume_reclaim_policy: {{ reclaim_policy }}
+          {% if storage_class %}
+          storage_class_name: {{ storage_class }}
+          {% endif %}
+          nfs:
+            path: {{ nfs_path }}
+            server: {{ nfs_server }}
+        """
+    ).strip()
+
+    with pytest.helpers.temp_file(f"{sls}.yml.jinja", contents, state_tree):
+        yield f"salt://{sls}.yml.jinja"
+
+
 def test_namespace_present(kubernetes, caplog):
     """
     Test kubernetes.namespace_present ensures namespace is created
@@ -1262,3 +1297,89 @@ def test_replicaset_present_with_test_true(kubernetes, caplog):
     finally:
         # Cleanup
         kubernetes.replicaset_absent(name=test_rs, namespace=namespace)
+
+
+def test_persistent_volume_present(kubernetes, caplog):
+    """Test persistent_volume_present state creates and updates PVs correctly"""
+    caplog.set_level(logging.INFO)
+    test_pv = "salt-test-pv"
+
+    spec = {
+        "capacity": {"storage": "1Gi"},
+        "access_modes": ["ReadWriteOnce"],
+        "persistent_volume_reclaim_policy": "Retain",
+        "nfs": {"path": "/mnt/test", "server": "nfs.example.com"},
+    }
+
+    try:
+        # Create persistent volume
+        result = kubernetes.persistent_volume_present(name=test_pv, spec=spec)
+        assert result["result"] is True
+        assert result["changes"], "Expected changes when creating PV"
+
+        # Verify idempotency - calling present again should not make changes
+        result = kubernetes.persistent_volume_present(name=test_pv, spec=spec)
+        assert result["result"] is True
+        assert result["comment"] == "The persistent volume already exists"
+        assert not result["changes"], "Expected no changes on second run"
+
+    finally:
+        kubernetes.persistent_volume_absent(name=test_pv)
+
+
+def test_persistent_volume_present_with_template(kubernetes, caplog, persistent_volume_template):
+    """Test persistent_volume_present with template rendering"""
+    caplog.set_level(logging.INFO)
+    test_pv = "salt-test-pv-template"
+
+    context = {
+        "name": test_pv,
+        "labels": {"type": "nfs"},
+        "storage": "1Gi",
+        "access_modes": ["ReadWriteOnce"],
+        "reclaim_policy": "Retain",
+        "storage_class": "nfs",
+        "nfs_path": "/exports/test",
+        "nfs_server": "nfs.example.com",
+    }
+
+    try:
+        result = kubernetes.persistent_volume_present(
+            name=test_pv,
+            spec={},  # Spec comes from template
+            source=persistent_volume_template,
+            template="jinja",
+            context=context,
+        )
+        assert result["result"] is True
+        assert result["changes"], "Expected changes when creating PV from template"
+
+    finally:
+        kubernetes.persistent_volume_absent(name=test_pv)
+
+
+def test_persistent_volume_absent(kubernetes, caplog):
+    """Test persistent_volume_absent state removes PVs correctly"""
+    caplog.set_level(logging.INFO)
+    test_pv = "salt-test-pv-absent"
+
+    # Create a PV first
+    spec = {
+        "capacity": {"storage": "1Gi"},
+        "access_modes": ["ReadWriteOnce"],
+        "persistent_volume_reclaim_policy": "Retain",
+        "nfs": {"path": "/mnt/test", "server": "nfs.example.com"},
+    }
+
+    kubernetes.persistent_volume_present(name=test_pv, spec=spec)
+
+    # Test removal
+    result = kubernetes.persistent_volume_absent(name=test_pv)
+    assert result["result"] is True
+    assert result["changes"], "Expected changes when removing PV"
+
+    # Verify idempotency - calling absent again should not make changes
+    result = kubernetes.persistent_volume_absent(name=test_pv)
+    assert result["result"] is True
+    assert result["comment"] == "The persistent volume does not exist"
+    assert not result["changes"], "Expected no changes on second run"

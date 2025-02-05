@@ -1121,3 +1121,138 @@ def replicaset_present(
     ret["changes"] = {"metadata": metadata, "spec": spec}
     ret["result"] = True
     return ret
+
+
+def persistent_volume_present(
+    name, spec, source="", template="", context=None, saltenv="base", **kwargs
+):
+    """
+    Ensures that the persistent volume is present with the specified configuration.
+
+    name
+        The name of the persistent volume.
+
+    spec
+        The persistent volume specification structure. See the kubernetes
+        documentation for a complete list of options that can be used in
+        the spec.
+
+    source
+        A file containing the persistent volume configuration in the official
+        kubernetes format.
+
+    template
+        Template engine to be used to render the source file.
+
+    context
+        Variables to be passed into the template. Should include 'name'
+        when using templates.
+
+    saltenv
+        The salt environment to use. Defaults to 'base'.
+
+    Example:
+
+    .. code-block:: yaml
+
+        # Example PersistentVolume for NFS
+        my-persistent-volume:
+          kubernetes.persistent_volume_present:
+            - name: my-pv
+            - spec:
+                capacity:
+                  storage: 1Gi
+                access_modes:
+                  - ReadWriteOnce
+                persistent_volume_reclaim_policy: Retain
+                nfs:
+                  path: /path/to/share
+                  server: nfs-server.local
+                  readOnly: false
+
+        # Using a file with YAML format
+        my-persistent-volume:
+          kubernetes.persistent_volume_present:
+            - name: my-pv
+            - source: salt://path/to/pv.yaml
+            - context:
+                name: my-pv-dynamic
+                storage_size: 5Gi
+                nfs_path: /exports/data
+    """
+    ret = {"name": name, "changes": {}, "result": False, "comment": ""}
+
+    if context is None:
+        context = {}
+
+    # Ensure name is in context for templates
+    if template and "name" not in context:
+        context["name"] = name
+
+    pv = __salt__["kubernetes.show_persistent_volume"](name, **kwargs)
+
+    if pv is None:
+        if __opts__["test"]:
+            ret["result"] = None
+            ret["comment"] = "The persistent volume is going to be created"
+            return ret
+
+        res = __salt__["kubernetes.create_persistent_volume"](
+            name=name,
+            spec=spec,
+            source=source,
+            template=template,
+            saltenv=saltenv,
+            context=context,
+            **kwargs,
+        )
+        ret["changes"][name] = {"old": {}, "new": res}
+        ret["result"] = True
+        return ret
+
+    ret["result"] = True if not __opts__["test"] else None
+    ret["comment"] = "The persistent volume already exists"
+    return ret
+
+
+def persistent_volume_absent(name, **kwargs):
+    """
+    Ensures that the specified persistent volume is absent.
+
+    name
+        The name of the persistent volume
+
+    Example:
+
+    .. code-block:: yaml
+
+        remove-persistent-volume:
+          kubernetes.persistent_volume_absent:
+            - name: my-pv
+    """
+    ret = {"name": name, "changes": {}, "result": False, "comment": ""}
+
+    pv = __salt__["kubernetes.show_persistent_volume"](name, **kwargs)
+
+    if pv is None:
+        ret["result"] = True if not __opts__["test"] else None
+        ret["comment"] = "The persistent volume does not exist"
+        return ret
+
+    if __opts__["test"]:
+        ret["comment"] = "The persistent volume is going to be deleted"
+        ret["result"] = None
+        return ret
+
+    res = __salt__["kubernetes.delete_persistent_volume"](name, **kwargs)
+    if res:
+        ret["result"] = True
+        ret["changes"] = {"kubernetes.persistent_volume": {"new": "absent", "old": "present"}}
+        if res.get("message"):
+            ret["comment"] = res["message"]
+        else:
+            ret["comment"] = "Persistent volume deleted"
+    else:
+        ret["comment"] = f"Something went wrong, response: {res}"
+
+    return ret

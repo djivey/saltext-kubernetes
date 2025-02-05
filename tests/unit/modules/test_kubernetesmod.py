@@ -536,3 +536,127 @@ spec:
             # Verify template rendering was called with correct context
             template_mock = list(kubernetes.__salt__["cp.cache_file"].mock_calls)[0]
             assert template_mock.args[0] == "/mock/replicaset.yaml"
+
+
+def test_persistent_volumes():
+    """
+    Test persistent_volumes listing
+    """
+    with mock_kubernetes_library() as mock_kubernetes_lib:
+        mock_kubernetes_lib.client.CoreV1Api.return_value = Mock(
+            **{
+                "list_persistent_volume.return_value.to_dict.return_value": {
+                    "items": [{"metadata": {"name": "mock_pv_name"}}]
+                }
+            }
+        )
+        assert kubernetes.persistent_volumes() == ["mock_pv_name"]
+        assert kubernetes.kubernetes.client.CoreV1Api().list_persistent_volume().to_dict.called
+
+
+def test_show_persistent_volume():
+    """
+    Test persistent volume detail retrieval
+    """
+    with mock_kubernetes_library() as mock_kubernetes_lib:
+        mock_kubernetes_lib.client.CoreV1Api.return_value = Mock(
+            **{
+                "read_persistent_volume.return_value.to_dict.return_value": {
+                    "metadata": {"name": "mock_pv_name"},
+                    "spec": {"capacity": {"storage": "1Gi"}},
+                }
+            }
+        )
+        assert kubernetes.show_persistent_volume("mock_pv_name") == {
+            "metadata": {"name": "mock_pv_name"},
+            "spec": {"capacity": {"storage": "1Gi"}},
+        }
+        assert kubernetes.kubernetes.client.CoreV1Api().read_persistent_volume().to_dict.called
+
+
+def test_delete_persistent_volume():
+    """
+    Test persistent volume deletion
+    """
+    with mock_kubernetes_library() as mock_kubernetes_lib:
+        mock_kubernetes_lib.client.V1DeleteOptions = Mock(return_value="")
+        mock_kubernetes_lib.client.CoreV1Api.return_value = Mock(
+            **{"delete_persistent_volume.return_value.to_dict.return_value": {"message": "Deleted"}}
+        )
+        result = kubernetes.delete_persistent_volume("mock_pv_name")
+        assert result == {"message": "Deleted"}
+        assert kubernetes.kubernetes.client.CoreV1Api().delete_persistent_volume().to_dict.called
+
+
+def test_create_persistent_volume():
+    """
+    Test persistent volume creation
+    """
+    spec = {
+        "capacity": {"storage": "1Gi"},
+        "access_modes": ["ReadWriteOnce"],
+        "persistent_volume_reclaim_policy": "Retain",
+        "nfs": {"path": "/share", "server": "nfs.example.com"},
+    }
+
+    with mock_kubernetes_library() as mock_kubernetes_lib:
+        mock_kubernetes_lib.client.V1ObjectMeta = MagicMock()
+        mock_kubernetes_lib.client.V1PersistentVolumeSpec = MagicMock()
+        mock_kubernetes_lib.client.V1PersistentVolume = MagicMock()
+        mock_kubernetes_lib.client.CoreV1Api.return_value = Mock(
+            **{"create_persistent_volume.return_value.to_dict.return_value": {}}
+        )
+
+        result = kubernetes.create_persistent_volume("test-pv", spec)
+        assert result == {}
+        assert kubernetes.kubernetes.client.CoreV1Api().create_persistent_volume().to_dict.called
+
+
+def test_create_persistent_volume_with_source():
+    """
+    Test persistent volume creation using YAML source file
+    """
+    mock_pv_yaml = """
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: test-pv
+spec:
+  capacity:
+    storage: 1Gi
+  access_modes:
+    - ReadWriteOnce
+  nfs:
+    path: /share
+    server: nfs.example.com
+"""
+
+    with mock_kubernetes_library() as mock_kubernetes_lib:
+        with (
+            patch("salt.utils.files.fopen", mock_open(read_data=mock_pv_yaml)),
+            patch(
+                "salt.utils.yaml.safe_load",
+                return_value={
+                    "kind": "PersistentVolume",
+                    "spec": {
+                        "capacity": {"storage": "1Gi"},
+                        "access_modes": ["ReadWriteOnce"],
+                        "nfs": {"path": "/share", "server": "nfs.example.com"},
+                    },
+                },
+            ),
+        ):
+            mock_kubernetes_lib.client.V1ObjectMeta = MagicMock()
+            mock_kubernetes_lib.client.V1PersistentVolumeSpec = MagicMock()
+            mock_kubernetes_lib.client.V1PersistentVolume = MagicMock()
+            mock_kubernetes_lib.client.CoreV1Api.return_value = Mock(
+                **{"create_persistent_volume.return_value.to_dict.return_value": {}}
+            )
+
+            result = kubernetes.create_persistent_volume(
+                name="test-pv", spec={}, source="/mock/pv.yaml"
+            )
+            assert result == {}
+            assert (
+                kubernetes.kubernetes.client.CoreV1Api().create_persistent_volume().to_dict.called
+            )

@@ -1,7 +1,6 @@
 import logging
 import sys
 import time
-from textwrap import dedent
 
 import pytest
 
@@ -47,30 +46,6 @@ def kubernetes_salt_minion(kubernetes_salt_master, minion_config_defaults):
 @pytest.fixture(scope="module")
 def salt_call_cli(kubernetes_salt_minion):
     return kubernetes_salt_minion.salt_call_cli()
-
-
-@pytest.fixture
-def namespace_template(state_tree):
-    sls = "k8s/namespace-template"
-    contents = dedent(
-        """
-        test_namespace:
-          kubernetes.namespace_present:
-            - name: {{ name }}
-            {% if labels %}
-            - labels:
-                {% for key, value in labels.items() %}
-                {{ key }}: {{ value }}
-                {% endfor %}
-            {% endif %}
-        """
-    ).strip()
-
-    with pytest.helpers.temp_file(f"{sls}.sls.jinja", contents, state_tree):
-        yield f"salt://{sls}.sls.jinja"
-
-
-# ...rest of fixtures for other resources...
 
 
 class TestKubernetesState:
@@ -886,3 +861,139 @@ remove_configmap:
                 name=test_rs,
                 namespace="default",
             )
+
+    def test_persistent_volume_present_absent(self, salt_call_cli, state_tree):
+        """Test persistent_volume_present and persistent_volume_absent states"""
+        test_pv = "salt-test-pv-state"
+
+        # Create state file for PV present
+        state_file = state_tree / "test_persistent_volume.sls"
+        state_file.write_text(
+            f"""
+test_persistent_volume:
+  kubernetes.persistent_volume_present:
+    - name: {test_pv}
+    - spec:
+        capacity:
+          storage: 1Gi
+        access_modes:
+          - ReadWriteOnce
+        persistent_volume_reclaim_policy: Retain
+        nfs:
+          path: /mnt/test
+          server: nfs.example.com
+"""
+        )
+
+        try:
+            # Apply persistent volume present state
+            ret = salt_call_cli.run("state.apply", "test_persistent_volume")
+            assert ret.returncode == 0
+            assert ret.data
+            # Check state result
+            state_ret = ret.data[next(iter(ret.data))]
+            assert state_ret["result"] is True
+            assert state_ret["changes"]
+            assert test_pv in state_ret["changes"]
+
+            # Verify persistent volume exists
+            ret = salt_call_cli.run("kubernetes.show_persistent_volume", name=test_pv)
+            assert ret.returncode == 0
+            assert ret.data["metadata"]["name"] == test_pv
+            assert ret.data["spec"]["capacity"]["storage"] == "1Gi"
+
+            # Test idempotency
+            ret = salt_call_cli.run("state.apply", "test_persistent_volume")
+            assert ret.returncode == 0
+            assert ret.data
+            state_ret = ret.data[next(iter(ret.data))]
+            assert state_ret["result"] is True
+            assert not state_ret["changes"]
+            assert "already exists" in state_ret["comment"]
+
+        finally:
+            # Test persistent volume removal
+            state_file.write_text(
+                f"""
+remove_persistent_volume:
+  kubernetes.persistent_volume_absent:
+    - name: {test_pv}
+"""
+            )
+
+            ret = salt_call_cli.run("state.apply", "test_persistent_volume")
+            assert ret.returncode == 0
+            assert ret.data
+            state_ret = ret.data[next(iter(ret.data))]
+            assert state_ret["result"] is True
+            assert state_ret["changes"]
+            assert "kubernetes.persistent_volume" in state_ret["changes"]
+
+            # Verify PV is gone with retry
+            for _ in range(5):
+                ret = salt_call_cli.run("kubernetes.show_persistent_volume", name=test_pv)
+                if ret.data is None:
+                    break
+                time.sleep(2)
+            else:
+                pytest.fail("PersistentVolume was not deleted")
+
+    def test_persistent_volume_present_with_template(self, salt_call_cli, state_tree):
+        """Test persistent_volume_present state using template rendering"""
+        test_pv = "salt-test-pv-template"
+
+        # Create state file that uses direct spec configuration
+        state_file = state_tree / "test_pv.sls"
+        state_file.write_text(
+            f"""
+test_persistent_volume:
+  kubernetes.persistent_volume_present:
+    - name: {test_pv}
+    - api_version: v1
+    - kind: PersistentVolume
+    - metadata:
+        name: {test_pv}
+        labels:
+          type: nfs
+    - spec:
+        capacity:
+          storage: 5Gi
+        access_modes:
+          - ReadWriteOnce
+        persistent_volume_reclaim_policy: Retain
+        storage_class_name: nfs
+        nfs:
+          path: /exports/test
+          server: nfs.example.com
+"""
+        )
+
+        try:
+            # Apply state
+            ret = salt_call_cli.run("state.apply", "test_pv")
+            assert ret.returncode == 0
+            assert ret.data
+            state_ret = ret.data[next(iter(ret.data))]
+            assert state_ret["result"] is True
+            assert state_ret["changes"]
+
+            # Verify PV was created with correct values
+            ret = salt_call_cli.run("kubernetes.show_persistent_volume", name=test_pv)
+            assert ret.returncode == 0
+            assert ret.data["metadata"]["name"] == test_pv
+            assert ret.data["spec"]["capacity"]["storage"] == "5Gi"
+            assert ret.data["spec"]["nfs"]["path"] == "/exports/test"
+            assert ret.data["spec"]["access_modes"] == ["ReadWriteOnce"]
+
+            # Test idempotency
+            ret = salt_call_cli.run("state.apply", "test_pv")
+            assert ret.returncode == 0
+            assert ret.data
+            state_ret = ret.data[next(iter(ret.data))]
+            assert state_ret["result"] is True
+            assert not state_ret["changes"]
+            assert "already exists" in state_ret["comment"]
+
+        finally:
+            # Cleanup
+            salt_call_cli.run("state.single", "kubernetes.persistent_volume_absent", name=test_pv)

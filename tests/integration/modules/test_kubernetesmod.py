@@ -601,3 +601,105 @@ class TestKubernetesModule:
         )
         assert result.returncode == 0
         assert result.data is None
+
+    def test_persistent_volume_lifecycle(self, salt_call_cli, caplog):
+        """Test the complete lifecycle of persistent volumes"""
+        caplog.set_level(logging.INFO)
+        test_pv = "salt-test-pv-lifecycle"
+
+        # Basic NFS persistent volume spec
+        pv_spec = {
+            "capacity": {"storage": "1Gi"},
+            "access_modes": ["ReadWriteOnce"],
+            "persistent_volume_reclaim_policy": "Retain",
+            "nfs": {"path": "/mnt/test", "server": "nfs.example.com"},
+        }
+
+        try:
+            # Create persistent volume
+            result = salt_call_cli.run(
+                "kubernetes.create_persistent_volume",
+                name=test_pv,
+                spec=pv_spec,
+            )
+            assert result.returncode == 0
+            assert isinstance(result.data, dict)
+            assert result.data["metadata"]["name"] == test_pv
+            assert result.data["spec"]["capacity"]["storage"] == "1Gi"
+
+            # Show persistent volume details
+            result = salt_call_cli.run(
+                "kubernetes.show_persistent_volume",
+                name=test_pv,
+            )
+            assert result.returncode == 0
+            assert result.data["metadata"]["name"] == test_pv
+            assert result.data["spec"]["nfs"]["server"] == "nfs.example.com"
+
+            # List persistent volumes and verify ours exists
+            result = salt_call_cli.run("kubernetes.persistent_volumes")
+            assert result.returncode == 0
+            assert isinstance(result.data, list)
+            assert test_pv in result.data
+
+        finally:
+            # Delete persistent volume
+            result = salt_call_cli.run(
+                "kubernetes.delete_persistent_volume",
+                name=test_pv,
+            )
+            assert result.returncode == 0
+
+            # Verify PV is gone with retry
+            for _ in range(5):
+                result = salt_call_cli.run(
+                    "kubernetes.show_persistent_volume",
+                    name=test_pv,
+                )
+                if result.data is None:
+                    break
+                time.sleep(2)
+            else:
+                pytest.fail("PersistentVolume still exists after deletion")
+
+    def test_persistent_volume_invalid_specs(self, salt_call_cli, caplog):
+        """Test validation of persistent volume specifications"""
+        caplog.set_level(logging.INFO)
+        test_pv = "salt-test-invalid-pv"
+
+        invalid_specs = [
+            # Missing capacity
+            {
+                "access_modes": ["ReadWriteOnce"],
+                "nfs": {"path": "/test", "server": "nfs.example.com"},
+            },
+            # Invalid access mode
+            {
+                "capacity": {"storage": "1Gi"},
+                "access_modes": ["InvalidMode"],
+                "nfs": {"path": "/test", "server": "nfs.example.com"},
+            },
+            # Missing storage in capacity
+            {
+                "capacity": {},
+                "access_modes": ["ReadWriteOnce"],
+                "nfs": {"path": "/test", "server": "nfs.example.com"},
+            },
+            # Invalid capacity type
+            {
+                "capacity": "1Gi",  # Should be dict
+                "access_modes": ["ReadWriteOnce"],
+                "nfs": {"path": "/test", "server": "nfs.example.com"},
+            },
+        ]
+
+        for spec in invalid_specs:
+            result = salt_call_cli.run(
+                "kubernetes.create_persistent_volume",
+                name=test_pv,
+                spec=spec,
+            )
+            # Should fail with error
+            assert result.returncode != 0
+            assert result.stderr != ""
+            assert any(x in result.stderr.lower() for x in ["invalid", "error", "required"])

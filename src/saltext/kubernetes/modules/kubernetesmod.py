@@ -493,6 +493,32 @@ def replicasets(namespace="default", **kwargs):
         _cleanup(**cfg)
 
 
+def persistent_volumes(**kwargs):
+    """
+    Return a list of kubernetes persistent volumes
+
+    CLI Example:
+
+    .. code-block:: bash
+
+        salt '*' kubernetes.persistent_volumes
+    """
+    cfg = _setup_conn(**kwargs)
+    try:
+        api_instance = kubernetes.client.CoreV1Api()
+        api_response = api_instance.list_persistent_volume()
+
+        return [pv["metadata"]["name"] for pv in api_response.to_dict().get("items")]
+    except (ApiException, HTTPError) as exc:
+        if isinstance(exc, ApiException) and exc.status == 404:
+            return None
+        else:
+            log.exception("Exception when calling CoreV1Api->list_persistent_volume")
+            raise CommandExecutionError(exc)
+    finally:
+        _cleanup(**cfg)
+
+
 def show_deployment(name, namespace="default", **kwargs):
     """
     Return the kubernetes deployment defined by name and namespace
@@ -695,6 +721,32 @@ def show_replicaset(name, namespace="default", **kwargs):
             return None
         else:
             log.exception("Exception when calling AppsV1Api->read_namespaced_replica_set")
+            raise CommandExecutionError(exc)
+    finally:
+        _cleanup(**cfg)
+
+
+def show_persistent_volume(name, **kwargs):
+    """
+    Return the kubernetes persistent volume defined by name
+
+    CLI Example:
+
+    .. code-block:: bash
+
+        salt '*' kubernetes.show_persistent_volume pv-name
+    """
+    cfg = _setup_conn(**kwargs)
+    try:
+        api_instance = kubernetes.client.CoreV1Api()
+        api_response = api_instance.read_persistent_volume(name)
+
+        return api_response.to_dict()
+    except (ApiException, HTTPError) as exc:
+        if isinstance(exc, ApiException) and exc.status == 404:
+            return None
+        else:
+            log.exception("Exception when calling CoreV1Api->read_persistent_volume")
             raise CommandExecutionError(exc)
     finally:
         _cleanup(**cfg)
@@ -957,6 +1009,33 @@ def delete_replicaset(name, namespace="default", **kwargs):
             return None
         else:
             log.exception("Exception when calling AppsV1Api->delete_namespaced_replica_set")
+            raise CommandExecutionError(exc)
+    finally:
+        _cleanup(**cfg)
+
+
+def delete_persistent_volume(name, **kwargs):
+    """
+    Deletes the kubernetes persistent volume defined by name
+
+    CLI Example:
+
+    .. code-block:: bash
+
+        salt '*' kubernetes.delete_persistent_volume pv-name
+    """
+    cfg = _setup_conn(**kwargs)
+    body = kubernetes.client.V1DeleteOptions()
+
+    try:
+        api_instance = kubernetes.client.CoreV1Api()
+        api_response = api_instance.delete_persistent_volume(name=name, body=body)
+        return api_response.to_dict()
+    except (ApiException, HTTPError) as exc:
+        if isinstance(exc, ApiException) and exc.status == 404:
+            return None
+        else:
+            log.exception("Exception when calling CoreV1Api->delete_persistent_volume")
             raise CommandExecutionError(exc)
     finally:
         _cleanup(**cfg)
@@ -1340,6 +1419,53 @@ def create_replicaset(
             return None
         else:
             log.exception("Exception when calling AppsV1Api->create_namespaced_replica_set")
+            raise CommandExecutionError(exc)
+    finally:
+        _cleanup(**cfg)
+
+
+def create_persistent_volume(
+    name, spec, source=None, template=None, saltenv="base", context=None, **kwargs
+):
+    """
+    Creates a persistent volume.
+
+    CLI Example:
+
+    .. code-block:: bash
+
+        salt '*' kubernetes.create_persistent_volume name=vol1 spec='{"access_modes": ...}'
+    """
+    if source:
+        src_obj = __read_and_render_yaml_file(source, template, saltenv, context)
+        if (
+            not isinstance(src_obj, dict)
+            or "kind" not in src_obj
+            or src_obj["kind"] != "PersistentVolume"
+        ):
+            raise CommandExecutionError("The source file must define a PersistentVolume")
+        if "spec" in src_obj:
+            spec = src_obj["spec"]
+
+    # Validate the spec
+    spec = __validate_persistent_volume_spec(spec)
+
+    body = kubernetes.client.V1PersistentVolume(
+        metadata=kubernetes.client.V1ObjectMeta(name=name),
+        spec=kubernetes.client.V1PersistentVolumeSpec(**spec),
+    )
+
+    cfg = _setup_conn(**kwargs)
+
+    try:
+        api_instance = kubernetes.client.CoreV1Api()
+        api_response = api_instance.create_persistent_volume(body)
+        return api_response.to_dict()
+    except (ApiException, HTTPError) as exc:
+        if isinstance(exc, ApiException) and exc.status == 404:
+            return None
+        else:
+            log.exception("Exception when calling CoreV1Api->create_persistent_volume")
             raise CommandExecutionError(exc)
     finally:
         _cleanup(**cfg)
@@ -2106,3 +2232,40 @@ def __dict_to_replicaset_spec(spec):
         return kubernetes.client.V1ReplicaSetSpec(**processed_spec)
     except (TypeError, ValueError) as exc:
         raise CommandExecutionError(f"Invalid replicaset spec: {exc}")
+
+
+def __validate_persistent_volume_spec(spec):
+    """
+    Validates the persistent volume spec ensuring required fields are present and valid.
+
+    Args:
+        spec (dict): The PV spec to validate
+
+    Raises:
+        CommandExecutionError: If the spec is invalid
+    """
+    if not isinstance(spec, dict):
+        raise CommandExecutionError("Persistent volume spec must be a dictionary")
+
+    # Validate capacity field is present and properly structured
+    if "capacity" not in spec:
+        raise CommandExecutionError("spec.capacity is required for persistent volumes")
+
+    if not isinstance(spec["capacity"], dict):
+        raise CommandExecutionError("spec.capacity must be a dictionary")
+
+    if "storage" not in spec["capacity"]:
+        raise CommandExecutionError("spec.capacity.storage is required for persistent volumes")
+
+    # Validate access modes if present
+    if "access_modes" in spec:
+        valid_modes = {"ReadOnlyMany", "ReadWriteMany", "ReadWriteOnce", "ReadWriteOncePod"}
+        if not isinstance(spec["access_modes"], (list, tuple)):
+            raise CommandExecutionError("access_modes must be a list")
+        for mode in spec["access_modes"]:
+            if mode not in valid_modes:
+                raise CommandExecutionError(
+                    f"Invalid access mode '{mode}'. Must be one of: {', '.join(sorted(valid_modes))}"
+                )
+
+    return spec

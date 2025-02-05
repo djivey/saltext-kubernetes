@@ -1585,3 +1585,102 @@ def test_replicaset_validation(kubernetes, caplog):
             )
         # Error message should mention validation error
         assert any(x in str(exc.value).lower() for x in ["invalid", "required", "must"])
+
+
+def test_persistent_volume_lifecycle(kubernetes, caplog):
+    """Test creating, reading, and deleting persistent volumes"""
+    caplog.set_level(logging.INFO)
+    test_pv = "salt-test-pv"
+
+    # Use correct snake_case keys to match k8s Python client
+    spec = {
+        "capacity": {"storage": "1Gi"},
+        "access_modes": ["ReadWriteOnce"],
+        "persistent_volume_reclaim_policy": "Retain",
+        "nfs": {"path": "/mnt/test", "server": "nfs.example.com"},
+    }
+
+    try:
+        # Test creation
+        result = kubernetes.create_persistent_volume(name=test_pv, spec=spec)
+        assert isinstance(result, dict)
+        assert result["metadata"]["name"] == test_pv
+
+        # Test reading
+        result = kubernetes.show_persistent_volume(test_pv)
+        assert isinstance(result, dict)
+        assert result["metadata"]["name"] == test_pv
+        assert result["spec"]["capacity"]["storage"] == "1Gi"
+
+        # Test listing
+        result = kubernetes.persistent_volumes()
+        assert isinstance(result, list)
+        assert test_pv in result
+
+        # Test deletion
+        result = kubernetes.delete_persistent_volume(test_pv)
+        assert isinstance(result, dict)
+
+        # Verify deletion
+        result = kubernetes.show_persistent_volume(test_pv)
+        assert result is None
+
+    finally:
+        # Cleanup
+        kubernetes.delete_persistent_volume(test_pv)
+
+
+def test_persistent_volume_creation_with_invalid_spec(kubernetes, caplog):
+    """Test persistent volume creation with invalid specifications"""
+    caplog.set_level(logging.INFO)
+    test_pv = "salt-test-invalid-pv"
+
+    invalid_specs = [
+        # Missing required capacity field
+        {"access_modes": ["ReadWriteOnce"], "nfs": {"path": "/test", "server": "nfs.example.com"}},
+        # Invalid access mode
+        {
+            "capacity": {"storage": "1Gi"},
+            "access_modes": ["InvalidMode"],
+            "nfs": {"path": "/test", "server": "nfs.example.com"},
+        },
+    ]
+
+    for spec in invalid_specs:
+        with pytest.raises(CommandExecutionError):
+            kubernetes.create_persistent_volume(name=test_pv, spec=spec)
+
+    # Verify no PV was created
+    assert kubernetes.show_persistent_volume(test_pv) is None
+
+
+def test_persistent_volume_with_source_file(kubernetes, caplog):
+    """Test persistent volume creation using source file"""
+    caplog.set_level(logging.INFO)
+    test_pv = "salt-test-pv-source"
+
+    # Create temp YAML file
+    pv_yaml = """
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: test-pv
+spec:
+  capacity:
+    storage: 1Gi
+  access_modes:
+    - ReadWriteOnce
+  persistent_volume_reclaim_policy: Retain
+  nfs:
+    path: /mnt/test
+    server: nfs.example.com
+"""
+    # Use str type for source path
+    with pytest.helpers.temp_file("test_pv.yaml", pv_yaml) as source:
+        try:
+            result = kubernetes.create_persistent_volume(name=test_pv, spec={}, source=str(source))
+            assert isinstance(result, dict)
+            assert result["metadata"]["name"] == test_pv
+
+        finally:
+            kubernetes.delete_persistent_volume(test_pv)

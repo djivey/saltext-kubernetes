@@ -5,6 +5,7 @@
 import base64
 from contextlib import contextmanager
 from unittest.mock import MagicMock
+from unittest.mock import mock_open
 from unittest.mock import patch
 
 import pytest
@@ -1077,3 +1078,150 @@ def test_replicaset_present__create_with_template():
                 saltenv="base",
                 context=context,
             )
+
+
+def test_persistent_volume_absent__noop_test_true():
+    """Test persistent_volume_absent with test=True and volume does not exist"""
+    with mock_func("show_persistent_volume", return_value=None, test=True):
+        actual = kubernetes.persistent_volume_absent(name="test-pv")
+        assert actual == {
+            "comment": "The persistent volume does not exist",
+            "changes": {},
+            "name": "test-pv",
+            "result": None,
+        }
+
+
+def test_persistent_volume_absent__noop():
+    """Test persistent_volume_absent when volume does not exist"""
+    with mock_func("show_persistent_volume", return_value=None):
+        actual = kubernetes.persistent_volume_absent(name="test-pv")
+        assert actual == {
+            "comment": "The persistent volume does not exist",
+            "changes": {},
+            "name": "test-pv",
+            "result": True,
+        }
+
+
+def test_persistent_volume_absent__delete_test_true():
+    """Test persistent_volume_absent with test=True and volume exists"""
+    with mock_func(
+        "show_persistent_volume", return_value={"metadata": {"name": "test-pv"}}, test=True
+    ):
+        actual = kubernetes.persistent_volume_absent(name="test-pv")
+        assert actual == {
+            "comment": "The persistent volume is going to be deleted",
+            "changes": {},
+            "name": "test-pv",
+            "result": None,
+        }
+
+
+def test_persistent_volume_absent__delete():
+    """Test successful persistent volume deletion"""
+    with mock_func("show_persistent_volume", return_value={"metadata": {"name": "test-pv"}}):
+        with mock_func("delete_persistent_volume", return_value={"message": "Deleted"}):
+            actual = kubernetes.persistent_volume_absent(name="test-pv")
+            assert actual == {
+                "comment": "Deleted",
+                "changes": {"kubernetes.persistent_volume": {"new": "absent", "old": "present"}},
+                "name": "test-pv",
+                "result": True,
+            }
+
+
+def test_persistent_volume_present__create_test_true():
+    """Test persistent_volume_present with test=True for creation"""
+    with mock_func("show_persistent_volume", return_value=None, test=True):
+        actual = kubernetes.persistent_volume_present(
+            name="test-pv",
+            spec={
+                "capacity": {"storage": "1Gi"},
+                "access_modes": ["ReadWriteOnce"],
+                "nfs": {"path": "/share", "server": "nfs.example.com"},
+            },
+        )
+        assert actual == {
+            "comment": "The persistent volume is going to be created",
+            "changes": {},
+            "name": "test-pv",
+            "result": None,
+        }
+
+
+def test_persistent_volume_present__create():
+    """Test successful persistent volume creation"""
+    spec = {
+        "capacity": {"storage": "1Gi"},
+        "access_modes": ["ReadWriteOnce"],
+        "nfs": {"path": "/share", "server": "nfs.example.com"},
+    }
+
+    with mock_func("show_persistent_volume", return_value=None):
+        with mock_func(
+            "create_persistent_volume",
+            return_value={"metadata": {"name": "test-pv"}, "spec": spec},
+        ):
+            actual = kubernetes.persistent_volume_present(name="test-pv", spec=spec)
+            assert actual == {
+                "comment": "",
+                "changes": {
+                    "test-pv": {
+                        "new": {"metadata": {"name": "test-pv"}, "spec": spec},
+                        "old": {},
+                    }
+                },
+                "name": "test-pv",
+                "result": True,
+            }
+
+
+def test_persistent_volume_present__create_with_source():
+    """Test persistent volume creation using source file"""
+    mock_pv_yaml = """
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: test-pv
+spec:
+  capacity:
+    storage: 1Gi
+  access_modes:  # Using snake_case in source yaml
+    - ReadWriteOnce
+  persistent_volume_reclaim_policy: Retain
+  nfs:
+    path: /share
+    server: nfs.example.com
+"""
+    mock_pv_dict = {
+        "kind": "PersistentVolume",
+        "metadata": {"name": "test-pv"},
+        "spec": {
+            "capacity": {"storage": "1Gi"},
+            "access_modes": ["ReadWriteOnce"],
+            "nfs": {"path": "/share", "server": "nfs.example.com"},
+        },
+    }
+
+    spec = {
+        "capacity": {"storage": "1Gi"},
+        "access_modes": ["ReadWriteOnce"],
+        "nfs": {"path": "/share", "server": "nfs.example.com"},
+    }
+
+    with mock_func("show_persistent_volume", return_value=None):
+        with (
+            patch("salt.utils.files.fopen", mock_open(read_data=mock_pv_yaml)),
+            patch("salt.utils.yaml.safe_load", return_value=mock_pv_dict),
+        ):
+            with mock_func("create_persistent_volume", return_value=mock_pv_dict):
+                actual = kubernetes.persistent_volume_present(
+                    name="test-pv", spec=spec, source="/mock/pv.yaml"
+                )
+                assert actual == {
+                    "comment": "",
+                    "changes": {"test-pv": {"old": {}, "new": mock_pv_dict}},
+                    "name": "test-pv",
+                    "result": True,
+                }
